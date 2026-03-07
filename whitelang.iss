@@ -14,18 +14,37 @@ PrivilegesRequired=lowest
 Uninstallable=no
 
 [Files]
-Source: "release_pkg\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "release_pkg\std\*"; DestDir: "{app}\std"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "release_pkg\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "release_pkg\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "release_pkg\bin\*"; DestDir: "{app}\bin"; Flags: recursesubdirs createallsubdirs
+Source: "release_pkg\std\*"; DestDir: "{app}\std"; Flags: recursesubdirs createallsubdirs
+Source: "release_pkg\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs createallsubdirs
+
+Source: "release_pkg\tools\*"; DestDir: "{app}\tools"; Flags: recursesubdirs createallsubdirs onlyifdoesntexist
 
 [Registry]
-; 写入 WL_PATH
 Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "WL_PATH"; ValueData: "{app}"; Flags: uninsdeletevalue
-; 写入 Path
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}\bin"; Check: NeedsAddPath('{app}\bin')
 
 [Code]
+const
+  ForceUpdateLLVM = False; // 更新llvm时，要将这个改为True
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ToolsDir: string;
+begin
+  if CurStep = ssInstall then
+  begin
+    if ForceUpdateLLVM then
+    begin
+      ToolsDir := ExpandConstant('{app}\tools');
+      if DirExists(ToolsDir) then
+      begin
+        DelTree(ToolsDir, True, True, True);
+      end;
+    end;
+  end;
+end;
+
 function NeedsAddPath(Param: string): boolean;
 var
   OrigPath: string;
