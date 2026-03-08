@@ -248,3 +248,20 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: Output/*
+
+
+      - name: Upload Artifact to Cloudflare R2
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp Output/ s3://${{ secrets.R2_BUCKET_NAME }}/${{ github.ref_name }}/ \
+            --recursive \
+            --endpoint-url ${{ secrets.R2_ENDPOINT }}
+
+          aws s3 cp Output/ s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
+            --recursive \
+            --endpoint-url ${{ secrets.R2_ENDPOINT }}
