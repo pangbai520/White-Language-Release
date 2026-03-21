@@ -237,12 +237,6 @@ jobs:
           ./release_pkg/bin/wlc hello.wl -o hello_test
           ./hello_test
 
-      - name: Upload Artifact to Action Summary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: Output/${{ matrix.artifact }}
-
       - name: Upload Artifact to Release
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
@@ -268,12 +262,6 @@ jobs:
           mv Output/"$ORIGINAL_NAME" Output/"$FINAL_NAME"
 
           echo "final_name=$FINAL_NAME" >> $GITHUB_OUTPUT
-
-      - name: Upload Artifact to Action Summary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.prep_name.outputs.final_name }}
-          path: Output/${{ steps.prep_name.outputs.final_name }}
 
       - name: Upload Artifact to Release
         uses: softprops/action-gh-release@v1
