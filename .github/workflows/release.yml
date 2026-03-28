@@ -195,8 +195,11 @@ jobs:
         if: startsWith(matrix.os_name, 'windows')
         shell: powershell
         run: |
+          mkdir -Force Output
           $basename = "${{ matrix.artifact }}".Replace(".exe", "")
-          iscc /O"Output" /F"$basename" whitelang.iss
+          $tagVersion = "${{ github.ref_name }}"
+          $plainVersion = if ($tagVersion.StartsWith("v")) { $tagVersion.Substring(1) } else { $tagVersion }
+          iscc /dAppVersion="$plainVersion" /O"Output" /F"$basename" whitelang.iss
 
       - name: "[Unix] Build Compiler & Runtime"
         if: startsWith(matrix.os_name, 'windows') == false

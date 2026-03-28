@@ -1,6 +1,6 @@
 [Setup]
 AppName=WhiteLanguage
-AppVersion=0.1
+AppVersion={#AppVersion}
 AppPublisher=White Language Team
 AppPublisherURL=https://white-lang.org
 SetupIconFile=icon.ico
