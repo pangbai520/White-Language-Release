@@ -272,7 +272,7 @@ jobs:
         with:
           files: Output/*
 
-      - name: Upload Artifact to Cloudflare R2 (Versioned Only)
+      - name: Upload Artifact to Cloudflare R2
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
@@ -281,8 +281,14 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           aws s3 cp Output/ s3://${{ secrets.R2_BUCKET_NAME }}/${{ github.ref_name }}/ \
-            --recursive \
-            --endpoint-url ${{ secrets.R2_ENDPOINT }}
+            --recursive --endpoint-url ${{ secrets.R2_ENDPOINT }}
+
+      - name: Stash for latest promotion
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.os_name }}
+          path: Output/
+          retention-days: 1
 
   promote-to-latest:
     name: Promote Version to Latest
@@ -290,14 +296,20 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: Sync R2 Versioned Folder to Latest
+      - name: Download all platforms assets
+        uses: actions/download-artifact@v4
+        with:
+          path: all_assets
+          pattern: assets-*
+          merge-multiple: true
+
+      - name: Sync to R2 Latest (Local to S3 Sync)
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/${{ github.ref_name }}/ \
-                    s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
-                    --delete \
-                    --endpoint-url ${{ secrets.R2_ENDPOINT }}
+          aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
+            --delete \
+            --endpoint-url ${{ secrets.R2_ENDPOINT }}
