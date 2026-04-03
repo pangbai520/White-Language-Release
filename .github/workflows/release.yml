@@ -23,18 +23,21 @@ jobs:
             artifact: WhiteLanguage-Windows-x64-Setup.exe
             llvm_repo: mstorsjo/llvm-mingw
             asset_keyword: ucrt-x86_64.zip
+            target_arch: x86_64  # 补全此参数供你下方的 iscc 逻辑使用
             
           - os_name: macos-arm64
             runner: macos-14
             artifact: whitelang-macos-arm64.tar.gz
             llvm_repo: llvm/llvm-project
             asset_keyword: macOS-ARM64.tar.xz
+            target_arch: aarch64
             
           - os_name: linux-x64
             runner: ubuntu-latest
             artifact: whitelang-linux-x64.tar.gz
             llvm_repo: llvm/llvm-project
             asset_keyword: Linux-X64.tar.xz
+            target_arch: x86_64
 
     steps:
       - name: Checkout Builder Repo
@@ -199,7 +202,14 @@ jobs:
           $basename = "${{ matrix.artifact }}".Replace(".exe", "")
           $tagVersion = "${{ github.ref_name }}"
           $plainVersion = if ($tagVersion.StartsWith("v")) { $tagVersion.Substring(1) } else { $tagVersion }
-          iscc /dAppVersion="$plainVersion" /O"Output" /F"$basename" whitelang.iss
+          
+          # 根据矩阵变量判断 InnoSetup 架构
+          $arch = "${{ matrix.target_arch }}"
+          if ($arch -eq "x86_64") { $inno_arch = "x64" }
+          elseif ($arch -eq "aarch64") { $inno_arch = "arm64" }
+          else { $inno_arch = "x86" }
+
+          iscc /dAppVersion="$plainVersion" /dAppArch="$inno_arch" /O"Output" /F"$basename" whitelang.iss
 
       - name: "[Unix] Build Compiler & Runtime"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -248,15 +258,12 @@ jobs:
           ORIGINAL_NAME="${{ matrix.artifact }}"
           
           if [[ "$ORIGINAL_NAME" == *.tar.gz ]]; then
-            # whitelang-linux-x64.tar.gz -> whitelang-linux-x64.tar-0.1.1.gz
             FINAL_NAME="${ORIGINAL_NAME%.tar.gz}.tar-${VERSION}.gz"
           else
-            # WhiteLanguage-Windows-x64-Setup.exe -> WhiteLanguage-Windows-x64-Setup-0.1.1.exe
             FINAL_NAME="${ORIGINAL_NAME%.exe}-${VERSION}.exe"
           fi
 
           mv Output/"$ORIGINAL_NAME" Output/"$FINAL_NAME"
-
           echo "final_name=$FINAL_NAME" >> $GITHUB_OUTPUT
 
       - name: Upload Artifact to Release
@@ -265,7 +272,7 @@ jobs:
         with:
           files: Output/*
 
-      - name: Upload Artifact to Cloudflare R2
+      - name: Upload Artifact to Cloudflare R2 (Versioned Only)
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
@@ -277,6 +284,20 @@ jobs:
             --recursive \
             --endpoint-url ${{ secrets.R2_ENDPOINT }}
 
-          aws s3 sync Output/ s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
-            --delete \
-            --endpoint-url ${{ secrets.R2_ENDPOINT }}
+  promote-to-latest:
+    name: Promote Version to Latest
+    needs: build-and-package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync R2 Versioned Folder to Latest
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 sync s3://${{ secrets.R2_BUCKET_NAME }}/${{ github.ref_name }}/ \
+                    s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
+                    --delete \
+                    --endpoint-url ${{ secrets.R2_ENDPOINT }}
