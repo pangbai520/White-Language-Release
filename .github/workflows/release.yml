@@ -3,7 +3,8 @@ name: White Language Global Release Pipeline
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*'
+      - '!v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -23,7 +24,7 @@ jobs:
             artifact: WhiteLanguage-Windows-x64-Setup.exe
             llvm_repo: mstorsjo/llvm-mingw
             asset_keyword: ucrt-x86_64.zip
-            target_arch: x86_64  # 补全此参数供你下方的 iscc 逻辑使用
+            target_arch: x86_64
             
           - os_name: macos-arm64
             runner: macos-14
@@ -40,6 +41,17 @@ jobs:
             target_arch: x86_64
 
     steps:
+      - name: Set Version Variable
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [[ "${{ github.ref }}" != refs/tags/* ]]; then
+            echo "TARGET_REF=main" >> $GITHUB_ENV
+            echo "IS_RELEASE=false" >> $GITHUB_ENV
+          else
+            echo "TARGET_REF=${{ github.ref_name }}" >> $GITHUB_ENV
+            echo "IS_RELEASE=true" >> $GITHUB_ENV
+          fi
+
       - name: Checkout Builder Repo
         uses: actions/checkout@v4
 
@@ -48,6 +60,7 @@ jobs:
         with:
           repository: 'pangbai520/White-Language'
           path: 'source_repo'
+          ref: ${{ env.TARGET_REF }}
 
       - name: Create Package Layout
         shell: bash
@@ -66,133 +79,178 @@ jobs:
           URL=$(gh release view --repo ${{ matrix.llvm_repo }} --json assets -q '[.assets[] | select(.name | contains("${{ matrix.asset_keyword }}")) | .url] | .[0]')
           echo "url=$URL" >> $GITHUB_OUTPUT
 
-      - name: "[Windows] Build Compiler & Runtime (Compile First, Strip Later)"
+      - name: "[Windows] Fetch LLVM"
         if: startsWith(matrix.os_name, 'windows')
         shell: bash
         run: |
           curl -L -o llvm.zip ${{ steps.get_llvm.outputs.url }}
           unzip -q llvm.zip
           cp -r llvm-mingw-*/* release_pkg/tools/llvm/
+
+
+      - name: "[Windows] Bootstrap Compiler & Build Runtime"
+        if: startsWith(matrix.os_name, 'windows')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p boot_env
+          gh release download \
+            -R ${{ github.repository }} \
+            --pattern "WhiteLanguage-Windows-x64-Portable-*.zip" \
+            --dir boot_dl \
+            --clobber
+
+          echo "Downloaded files:"
+          ls -R boot_dl || true
+
+          unzip -q boot_dl/*.zip -d boot_env
+
+          export WL_PATH="$PWD/boot_env"
+
+          WLC_EXE=$(find boot_env -name wlc.exe)
+          echo "Found wlc at: $WLC_EXE"
+
           LLVM_DIR="release_pkg/tools/llvm"
 
-          if [ -f "wlc.rc" ]; then
-            $LLVM_DIR/bin/windres wlc.rc -O coff -o wlc_icon.res
-            ICON="wlc_icon.res"
-          else
-            ICON=""
-          fi
+          [ -f "source_repo/wlc.rc" ] && $LLVM_DIR/bin/windres source_repo/wlc.rc -O coff -o wlc_icon.res || true
+          ICON=$([ -f "wlc_icon.res" ] && echo "wlc_icon.res" || echo "")
 
-          $LLVM_DIR/bin/clang.exe wlc.ll source_repo/runtime/wl_runtime.c $ICON -o release_pkg/bin/wlc.exe -O2 -fno-builtin
-          $LLVM_DIR/bin/clang.exe -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.obj -O2
+          "$WLC_EXE" source_repo/src/wlc.wl $ICON -o release_pkg/bin/wlc.exe -O3
 
-          rm -rf $LLVM_DIR/python
-          rm -rf $LLVM_DIR/busybox
-          rm -rf $LLVM_DIR/share
-          rm -rf $LLVM_DIR/include
-          rm -f $LLVM_DIR/LICENSE.TXT
+          release_pkg/tools/llvm/bin/clang.exe -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.obj -O2
+      
+      - name: "[Windows] Trim LLVM (Cleanup)"
+        if: startsWith(matrix.os_name, 'windows')
+        shell: bash
+        run: |
+          LLVM_DIR="release_pkg/tools/llvm"
           
-          rm -rf $LLVM_DIR/aarch64-w64-mingw32
-          rm -rf $LLVM_DIR/arm64ec-w64-mingw32
-          rm -rf $LLVM_DIR/armv7-w64-mingw32
-          rm -rf $LLVM_DIR/i686-w64-mingw32
-          
-          rm -rf $LLVM_DIR/x86_64-w64-mingw32/share
-          rm -rf $LLVM_DIR/x86_64-w64-mingw32/bin
-          rm -rf $LLVM_DIR/lib/libear
-          rm -rf $LLVM_DIR/lib/libscanbuild
+          rm -rf $LLVM_DIR/python $LLVM_DIR/busybox $LLVM_DIR/share $LLVM_DIR/include $LLVM_DIR/LICENSE.TXT
+          rm -rf $LLVM_DIR/aarch64-w64-mingw32 $LLVM_DIR/arm64ec-w64-mingw32 $LLVM_DIR/armv7-w64-mingw32 $LLVM_DIR/i686-w64-mingw32
+          rm -rf $LLVM_DIR/x86_64-w64-mingw32/share $LLVM_DIR/x86_64-w64-mingw32/bin
+          rm -rf $LLVM_DIR/lib/libear $LLVM_DIR/lib/libscanbuild
           
           CLANG_VER_DIR=$(ls -d $LLVM_DIR/lib/clang/* | head -n 1)
-          rm -rf $CLANG_VER_DIR/lib/linux
-          rm -rf $CLANG_VER_DIR/include/cuda_wrappers
-          rm -rf $CLANG_VER_DIR/include/llvm_libc_wrappers
-          rm -rf $CLANG_VER_DIR/include/llvm_offload_wrappers
-          rm -rf $CLANG_VER_DIR/include/openmp_wrappers
-          rm -rf $CLANG_VER_DIR/include/ppc_wrappers
-          rm -rf $CLANG_VER_DIR/include/zos_wrappers
-          rm -rf $CLANG_VER_DIR/bin
-          rm -rf $CLANG_VER_DIR/share
+          rm -rf $CLANG_VER_DIR/lib/linux $CLANG_VER_DIR/include/*_wrappers $CLANG_VER_DIR/bin $CLANG_VER_DIR/share
           
-          rm -f $LLVM_DIR/bin/libpython*.dll
-          rm -f $LLVM_DIR/bin/aarch64-*
-          rm -f $LLVM_DIR/bin/armv7-*
-          rm -f $LLVM_DIR/bin/arm64ec-*
-          rm -f $LLVM_DIR/bin/i686-*
-          rm -f $LLVM_DIR/bin/*mingw32uwp*
-          rm -f $LLVM_DIR/bin/lldb*
-          rm -f $LLVM_DIR/bin/liblldb*
-          rm -f $LLVM_DIR/bin/clang-format*
-          rm -f $LLVM_DIR/bin/clang-tidy*
-          rm -f $LLVM_DIR/bin/llvm-objdump*
-          rm -f $LLVM_DIR/bin/llvm-pdbutil*
-          rm -f $LLVM_DIR/bin/clangd*
-          rm -f $LLVM_DIR/bin/clang-scan-deps*
-          rm -f $LLVM_DIR/bin/clang-target-wrapper.exe
-          rm -f $LLVM_DIR/bin/git-clang-format*
-          rm -f $LLVM_DIR/bin/run-clang-tidy*
-          rm -f $LLVM_DIR/bin/scan-build*
-          rm -f $LLVM_DIR/bin/analyze-build*
-          rm -f $LLVM_DIR/bin/intercept-build*
-          rm -f $LLVM_DIR/bin/llvm-cov*
-          rm -f $LLVM_DIR/bin/llvm-profdata*
-          rm -f $LLVM_DIR/bin/llvm-ml*
-          rm -f $LLVM_DIR/bin/llvm-symbolizer.exe
-          rm -f $LLVM_DIR/bin/llvm-wrapper.exe
-
-          rm -f $LLVM_DIR/bin/llvm-cxxfilt.exe
-          rm -f $LLVM_DIR/bin/llvm-lib.exe
-          rm -f $LLVM_DIR/bin/llvm-ranlib.exe
-          rm -f $LLVM_DIR/bin/llvm-readelf.exe
-          rm -f $LLVM_DIR/bin/llvm-rc.exe
-          rm -f $LLVM_DIR/bin/llvm-cvtres.exe
-          rm -f $LLVM_DIR/bin/llvm-dlltool.exe
-          rm -f $LLVM_DIR/bin/llvm-readobj.exe
-          rm -f $LLVM_DIR/bin/dlltool.exe
-          rm -f $LLVM_DIR/bin/*-ar.exe $LLVM_DIR/bin/ar.exe
-          rm -f $LLVM_DIR/bin/*-nm.exe $LLVM_DIR/bin/nm.exe
-          rm -f $LLVM_DIR/bin/*-objcopy.exe $LLVM_DIR/bin/objcopy.exe
-          rm -f $LLVM_DIR/bin/*-size.exe $LLVM_DIR/bin/size.exe
-          rm -f $LLVM_DIR/bin/*-strings.exe $LLVM_DIR/bin/strings.exe
-          rm -f $LLVM_DIR/bin/*-strip.exe $LLVM_DIR/bin/strip.exe
-          rm -f $LLVM_DIR/bin/*addr2line.exe
-          rm -f $LLVM_DIR/bin/objdump*
-          rm -f $LLVM_DIR/bin/ranlib.exe
-          rm -f $LLVM_DIR/bin/readelf.exe
+          rm -f $LLVM_DIR/bin/libpython*.dll $LLVM_DIR/bin/aarch64-* $LLVM_DIR/bin/armv7-* $LLVM_DIR/bin/arm64ec-* $LLVM_DIR/bin/i686-* $LLVM_DIR/bin/*mingw32uwp*
+          rm -f $LLVM_DIR/bin/lldb* $LLVM_DIR/bin/liblldb* $LLVM_DIR/bin/clang-format* $LLVM_DIR/bin/clang-tidy*
+          rm -f $LLVM_DIR/bin/llvm-objdump* $LLVM_DIR/bin/llvm-pdbutil* $LLVM_DIR/bin/clangd* $LLVM_DIR/bin/clang-scan-deps*
+          rm -f $LLVM_DIR/bin/clang-target-wrapper.exe $LLVM_DIR/bin/git-clang-format* $LLVM_DIR/bin/run-clang-tidy*
+          rm -f $LLVM_DIR/bin/scan-build* $LLVM_DIR/bin/analyze-build* $LLVM_DIR/bin/intercept-build*
+          rm -f $LLVM_DIR/bin/llvm-cov* $LLVM_DIR/bin/llvm-profdata* $LLVM_DIR/bin/llvm-ml* $LLVM_DIR/bin/llvm-symbolizer.exe $LLVM_DIR/bin/llvm-wrapper.exe
           
-          rm -f $LLVM_DIR/bin/{c11,c99,cc,gcc,c++,clang++,g++}.exe
-          rm -f $LLVM_DIR/bin/*-c++.exe
-          rm -f $LLVM_DIR/bin/*-clang++.exe
-          rm -f $LLVM_DIR/bin/*-g++.exe
-          rm -f $LLVM_DIR/bin/*.sh
-          rm -f $LLVM_DIR/bin/x86_64-w64-mingw32-gcc.exe
-          rm -f $LLVM_DIR/bin/gendef.exe
-          rm -f $LLVM_DIR/bin/mingw32-make.exe
-          rm -f $LLVM_DIR/bin/widl.exe
-          rm -f $LLVM_DIR/bin/ld
+          rm -f $LLVM_DIR/bin/llvm-cxxfilt.exe $LLVM_DIR/bin/llvm-lib.exe $LLVM_DIR/bin/llvm-ranlib.exe $LLVM_DIR/bin/llvm-readelf.exe
+          rm -f $LLVM_DIR/bin/llvm-rc.exe $LLVM_DIR/bin/llvm-cvtres.exe $LLVM_DIR/bin/llvm-dlltool.exe $LLVM_DIR/bin/llvm-readobj.exe
+          rm -f $LLVM_DIR/bin/dlltool.exe $LLVM_DIR/bin/*-ar.exe $LLVM_DIR/bin/ar.exe $LLVM_DIR/bin/*-nm.exe $LLVM_DIR/bin/nm.exe
+          rm -f $LLVM_DIR/bin/*-objcopy.exe $LLVM_DIR/bin/objcopy.exe $LLVM_DIR/bin/*-size.exe $LLVM_DIR/bin/size.exe
+          rm -f $LLVM_DIR/bin/*-strings.exe $LLVM_DIR/bin/strings.exe $LLVM_DIR/bin/*-strip.exe $LLVM_DIR/bin/strip.exe
+          rm -f $LLVM_DIR/bin/*addr2line.exe $LLVM_DIR/bin/objdump* $LLVM_DIR/bin/ranlib.exe $LLVM_DIR/bin/readelf.exe
           
-          rm -f $LLVM_DIR/bin/libclang_rt.asan_dynamic-x86_64.dll
-          rm -f $LLVM_DIR/bin/{libffi-8.dll,libomp.dll}
+          rm -f $LLVM_DIR/bin/{c11,c99,cc,gcc,c++,clang++,g++}.exe $LLVM_DIR/bin/*-c++.exe $LLVM_DIR/bin/*-clang++.exe $LLVM_DIR/bin/*-g++.exe
+          rm -f $LLVM_DIR/bin/*.sh $LLVM_DIR/bin/x86_64-w64-mingw32-gcc.exe $LLVM_DIR/bin/gendef.exe $LLVM_DIR/bin/mingw32-make.exe $LLVM_DIR/bin/widl.exe $LLVM_DIR/bin/ld
           
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libd3d*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libd2d*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libx3d*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libxaudio*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libxinput*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libmf*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libwindows.*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libc++*.a
+          rm -f $LLVM_DIR/bin/libclang_rt.asan_dynamic-x86_64.dll $LLVM_DIR/bin/{libffi-8.dll,libomp.dll}
+          
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libd3d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libd2d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libx3d*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libxaudio*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libxinput*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libmf*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libwindows.*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libc++*.a
+          
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libntvdm*.a $LLVM_DIR/x86_64-w64-mingw32/lib/*fax*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libie*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libvss*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbluetooth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libwlan*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libiis*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptui*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptxml*.a
 
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libntvdm*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/*fax*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libie*.a
+      - name: "[Unix] Fetch and Trim LLVM"
+        if: startsWith(matrix.os_name, 'windows') == false
+        shell: bash
+        run: |
+          curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
+          tar -xf llvm.tar.xz
+          cp LLVM-*/bin/clang release_pkg/tools/llvm/bin/
+          cp LLVM-*/bin/ld.lld release_pkg/tools/llvm/bin/ || true
+          cp LLVM-*/bin/lld release_pkg/tools/llvm/bin/ || true
 
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libvss*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libbth*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libbluetooth*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libwlan*.a
+      - name: "[Unix] Bootstrap Compiler & Build Runtime"
+        if: startsWith(matrix.os_name, 'windows') == false
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p boot_env
 
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libiis*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptui*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptxml*.a
+          OS_PATTERN="whitelang-${{ matrix.os_name == 'macos-arm64' && 'macos-arm64' || 'linux-x64' }}*.tar*.gz"
+
+          gh release download \
+            -R ${{ github.repository }} \
+            --pattern "$OS_PATTERN" \
+            --dir boot_dl \
+            --clobber \
+
+          echo "Downloaded files:"
+          ls -R boot_dl || true
+
+          tar -xzf boot_dl/*.tar*.gz -C boot_env
+
+          export WL_PATH="$PWD/boot_env"
+          chmod +x boot_env/bin/wlc
+
+          if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
+            export SDKROOT=$(xcrun --show-sdk-path)
+            export CPATH="$SDKROOT/usr/include"
+            export LIBRARY_PATH="$SDKROOT/usr/lib"
+          else
+            export CPATH=/usr/include
+            export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+          fi
+
+          boot_env/bin/wlc source_repo/src/wlc.wl -o release_pkg/bin/wlc -O3
+
+          release_pkg/tools/llvm/bin/clang -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.o -O2
+
+      - name: Run Automated Test Suite
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
+            export SDKROOT=$(xcrun --show-sdk-path)
+          fi
+          
+          WLC="$PWD/release_pkg/bin/wlc"
+          [ -f "${WLC}.exe" ] && WLC="${WLC}.exe"
+          
+          TESTS=$(find source_repo/tests -type f -name "*.wl" | grep -v "/failure/" | grep -v "/integration/")
+          ERRORS=0
+          
+          for file in $TESTS; do
+            echo "Running test: $file"
+            $WLC "$file" -o test_bin
+            if [ $? -ne 0 ]; then
+              echo "Compilation Failed: $file"
+              ERRORS=$((ERRORS+1))
+              continue
+            fi
+            
+            if [ -f "test_bin.exe" ]; then
+              OUTPUT=$(./test_bin.exe 2>&1 || true)
+            else
+              OUTPUT=$(./test_bin 2>&1 || true)
+            fi
+            
+            if ! echo "$OUTPUT" | grep -q "PASS:"; then
+              echo "Test Failed: $file"
+              echo "Output: $OUTPUT"
+              ERRORS=$((ERRORS+1))
+            fi
+            
+            rm -f test_bin test_bin.exe
+          done
+          
+          if [ $ERRORS -ne 0 ]; then
+            echo "$ERRORS test(s) failed!"
+            exit 1
+          fi
+          echo "All tests passed successfully!"
 
       - name: "[Windows] Compile InnoSetup Installer"
         if: startsWith(matrix.os_name, 'windows')
@@ -202,31 +260,13 @@ jobs:
           $basename = "${{ matrix.artifact }}".Replace(".exe", "")
           $tagVersion = "${{ github.ref_name }}"
           $plainVersion = if ($tagVersion.StartsWith("v")) { $tagVersion.Substring(1) } else { $tagVersion }
-          
-          # 根据矩阵变量判断 InnoSetup 架构
+
           $arch = "${{ matrix.target_arch }}"
           if ($arch -eq "x86_64") { $inno_arch = "x64" }
           elseif ($arch -eq "aarch64") { $inno_arch = "arm64" }
           else { $inno_arch = "x86" }
 
           iscc /dAppVersion="$plainVersion" /dAppArch="$inno_arch" /O"Output" /F"$basename" whitelang.iss
-
-      - name: "[Unix] Build Compiler & Runtime"
-        if: startsWith(matrix.os_name, 'windows') == false
-        shell: bash
-        run: |
-          sed -i.bak '/target datalayout/d' wlc.ll
-          sed -i.bak '/target triple/d' wlc.ll
-
-          clang wlc.ll source_repo/runtime/wl_runtime.c -o release_pkg/bin/wlc -O2 -lm -fno-builtin
-          clang -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.o -O2
-
-          curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
-          tar -xf llvm.tar.xz
-
-          cp LLVM-*/bin/clang release_pkg/tools/llvm/bin/
-          cp LLVM-*/bin/ld.lld release_pkg/tools/llvm/bin/ || true
-          cp LLVM-*/bin/lld release_pkg/tools/llvm/bin/ || true
 
       - name: "[Unix] Compress Tarball"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -236,19 +276,17 @@ jobs:
           cd release_pkg
           tar -czf ../Output/${{ matrix.artifact }} .
 
-      - name: Verify macOS Compiler
-        if: matrix.os_name == 'macos-arm64'
-        shell: bash
+      - name: "[Windows] Create Portable Zip"
+        if: startsWith(matrix.os_name, 'windows')
+        shell: pwsh
         run: |
-          echo 'import "builtin"' > hello.wl
-          echo 'func main() -> Int {' >> hello.wl
-          echo '    builtin.print("Hello from WhiteLanguage on macOS!");' >> hello.wl
-          echo '    return 0;' >> hello.wl
-          echo '}' >> hello.wl
-          export WL_PATH="$PWD/release_pkg"
-          export SDKROOT=$(xcrun --show-sdk-path)
-          ./release_pkg/bin/wlc hello.wl -o hello_test
-          ./hello_test
+          if (!(Test-Path "Output")) { New-Item -ItemType Directory -Path "Output" }
+          $tagVersion = "${{ github.ref_name }}"
+          $plainVersion = if ($tagVersion.StartsWith("v")) { $tagVersion.Substring(1) } else { $tagVersion }
+          $zipName = "WhiteLanguage-Windows-x64-Portable-$plainVersion.zip"
+
+          Compress-Archive -Path "release_pkg\*" -DestinationPath "Output\$zipName" -Force
+          Write-Host "Portable ZIP created: Output\$zipName"
 
       - name: Prepare Versioned Artifact Name
         id: prep_name
@@ -272,17 +310,6 @@ jobs:
         with:
           files: Output/*
 
-      - name: Upload Artifact to Cloudflare R2
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          aws s3 cp Output/ s3://${{ secrets.R2_BUCKET_NAME }}/${{ github.ref_name }}/ \
-            --recursive --endpoint-url ${{ secrets.R2_ENDPOINT }}
-
       - name: Stash for latest promotion
         uses: actions/upload-artifact@v4
         with:
@@ -290,8 +317,8 @@ jobs:
           path: Output/
           retention-days: 1
 
-  promote-to-latest:
-    name: Promote Version to Latest
+  promote-to-r2:
+    name: Sync Assets to Cloudflare R2
     needs: build-and-package
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -303,13 +330,21 @@ jobs:
           pattern: assets-*
           merge-multiple: true
 
-      - name: Sync to R2 Latest (Local to S3 Sync)
+      - name: Sync to R2 Phased and Latest
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
+          PHASE_VER="${{ github.ref_name }}"
+
+          aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/${PHASE_VER}/ \
+            --exclude "*Portable*" \
+            --delete \
+            --endpoint-url ${{ secrets.R2_ENDPOINT }}
+
           aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
+            --exclude "*Portable*" \
             --delete \
             --endpoint-url ${{ secrets.R2_ENDPOINT }}
