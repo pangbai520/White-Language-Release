@@ -3,8 +3,7 @@ name: White Language Global Release Pipeline
 on:
   push:
     tags:
-      - 'v*.*'
-      - '!v*.*.*'
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -331,19 +330,24 @@ jobs:
           pattern: assets-*
           merge-multiple: true
 
-      - name: Sync to R2 Phased and Latest
+      - name: Sync to R2 Selective (Dots Logic)
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          PHASE_VER="${{ github.ref_name }}"
-          aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/${PHASE_VER}/ \
-            --exclude "*Portable*" \
-            --delete \
-            --endpoint-url ${{ secrets.R2_ENDPOINT }}
-          aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
-            --exclude "*Portable*" \
-            --delete \
-            --endpoint-url ${{ secrets.R2_ENDPOINT }}
+          TAG="${{ github.ref_name }}"
+          DOT_COUNT=$(echo $TAG | tr -cd '.' | wc -c)
+
+          if [ "$DOT_COUNT" -eq 1 ]; then
+            aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/${TAG}/ \
+              --exclude "*Portable*" \
+              --delete \
+              --endpoint-url ${{ secrets.R2_ENDPOINT }}
+
+            aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
+              --exclude "*Portable*" \
+              --delete \
+              --endpoint-url ${{ secrets.R2_ENDPOINT }}
+          fi
