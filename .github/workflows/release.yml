@@ -87,7 +87,6 @@ jobs:
           unzip -q llvm.zip
           cp -r llvm-mingw-*/* release_pkg/tools/llvm/
 
-
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows')
         shell: bash
@@ -161,15 +160,22 @@ jobs:
           rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libvss*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbluetooth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libwlan*.a
           rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libiis*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptui*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptxml*.a
 
-      - name: "[Unix] Fetch and Trim LLVM"
+      - name: "[Unix] Fetch LLVM"
         if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
         run: |
           curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
-          tar -xf llvm.tar.xz
-          cp LLVM-*/bin/clang release_pkg/tools/llvm/bin/
-          cp LLVM-*/bin/ld.lld release_pkg/tools/llvm/bin/ || true
-          cp LLVM-*/bin/lld release_pkg/tools/llvm/bin/ || true
+          mkdir -p llvm_tmp
+          tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
+          mkdir -p release_pkg/tools/llvm
+          cp -r llvm_tmp/* release_pkg/tools/llvm/
+          rm -rf llvm_tmp
+
+          if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
+            echo "Removing conflicting libraries on macOS..."
+            rm -f release_pkg/tools/llvm/lib/libc++*
+            rm -f release_pkg/tools/llvm/lib/libLLVM*
+          fi
 
       - name: "[Unix] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -177,36 +183,44 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p boot_env
-
-          OS_PATTERN="whitelang-${{ matrix.os_name == 'macos-arm64' && 'macos-arm64' || 'linux-x64' }}*.tar*.gz"
-
-          gh release download \
+          mkdir -p boot_env boot_dl
+          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts | grep -v "${{ github.ref_name }}" | head -n 1 | awk '{print $1}')
+          
+          gh release download "$PREV_TAG" \
             -R ${{ github.repository }} \
-            --pattern "$OS_PATTERN" \
-            --dir boot_dl \
-            --clobber \
+            --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" \
+            --dir boot_dl --clobber
 
-          echo "Downloaded files:"
-          ls -R boot_dl || true
-
-          tar -xzf boot_dl/*.tar*.gz -C boot_env
-
+          tar -xzf boot_dl/*.tar.gz -C boot_env
           export WL_PATH="$PWD/boot_env"
           chmod +x boot_env/bin/wlc
-
+          
           if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
             export SDKROOT=$(xcrun --show-sdk-path)
-            export CPATH="$SDKROOT/usr/include"
-            export LIBRARY_PATH="$SDKROOT/usr/lib"
-          else
-            export CPATH=/usr/include
-            export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
           fi
-
+          
           boot_env/bin/wlc source_repo/src/wlc.wl -o release_pkg/bin/wlc -O3
-
           release_pkg/tools/llvm/bin/clang -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.o -O2
+
+      - name: "[Unix] Trim LLVM (Cleanup)"
+        if: startsWith(matrix.os_name, 'windows') == false
+        shell: bash
+        run: |
+          LLVM_DIR="$PWD/release_pkg/tools/llvm"
+          
+          if [ -d "$LLVM_DIR" ]; then
+            cd "$LLVM_DIR"
+            echo "Trimming LLVM at $LLVM_DIR"
+            find bin -type f ! -name "clang*" ! -name "ld.lld" ! -name "lld" -delete
+            rm -rf include share
+            find lib -maxdepth 1 -type f -name "*.dylib" -delete
+            find lib -maxdepth 1 -type f -name "*.a" -delete
+            
+            echo "Trim complete. Remaining size:"
+            du -sh .
+          else
+            echo "::warning::LLVM directory not found, skipping trim."
+          fi
 
       - name: Run Automated Test Suite
         shell: bash
@@ -221,12 +235,15 @@ jobs:
           
           TESTS=$(find source_repo/tests -type f -name "*.wl" | grep -v "/failure/" | grep -v "/integration/")
           ERRORS=0
-          
+          FAILED_FILES=()
+
           for file in $TESTS; do
             echo "Running test: $file"
+            
             $WLC "$file" -o test_bin
             if [ $? -ne 0 ]; then
-              echo "Compilation Failed: $file"
+              echo "::error file=$file::Compilation Failed"
+              FAILED_FILES+=("[Compile Error] $file")
               ERRORS=$((ERRORS+1))
               continue
             fi
@@ -238,16 +255,22 @@ jobs:
             fi
             
             if ! echo "$OUTPUT" | grep -q "PASS:"; then
-              echo "Test Failed: $file"
+              echo "::error file=$file::Test Logic Failed"
               echo "Output: $OUTPUT"
+              FAILED_FILES+=("[Runtime Error] $file")
               ERRORS=$((ERRORS+1))
             fi
             
-            rm -f test_bin test_bin.exe
+            rm -f test_bin test_bin test_bin.exe
           done
           
           if [ $ERRORS -ne 0 ]; then
-            echo "$ERRORS test(s) failed!"
+            echo "------------------------------------------"
+            echo "TEST SUMMARY: $ERRORS tests failed!"
+            for failed in "${FAILED_FILES[@]}"; do
+              echo "  - $failed"
+            done
+            echo "------------------------------------------"
             exit 1
           fi
           echo "All tests passed successfully!"
@@ -257,16 +280,9 @@ jobs:
         shell: powershell
         run: |
           mkdir -Force Output
-          $basename = "${{ matrix.artifact }}".Replace(".exe", "")
-          $tagVersion = "${{ github.ref_name }}"
-          $plainVersion = if ($tagVersion.StartsWith("v")) { $tagVersion.Substring(1) } else { $tagVersion }
-
-          $arch = "${{ matrix.target_arch }}"
-          if ($arch -eq "x86_64") { $inno_arch = "x64" }
-          elseif ($arch -eq "aarch64") { $inno_arch = "arm64" }
-          else { $inno_arch = "x86" }
-
-          iscc /dAppVersion="$plainVersion" /dAppArch="$inno_arch" /O"Output" /F"$basename" whitelang.iss
+          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $outName = "WhiteLanguage-Windows-x64-Setup-$tagVersion"
+          iscc /dAppVersion="$tagVersion" /dAppArch="x64" /O"Output" /F"$outName" whitelang.iss
 
       - name: "[Unix] Compress Tarball"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -280,29 +296,20 @@ jobs:
         if: startsWith(matrix.os_name, 'windows')
         shell: pwsh
         run: |
-          if (!(Test-Path "Output")) { New-Item -ItemType Directory -Path "Output" }
-          $tagVersion = "${{ github.ref_name }}"
-          $plainVersion = if ($tagVersion.StartsWith("v")) { $tagVersion.Substring(1) } else { $tagVersion }
-          $zipName = "WhiteLanguage-Windows-x64-Portable-$plainVersion.zip"
-
+          mkdir -Force Output
+          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $zipName = "WhiteLanguage-Windows-x64-Portable-$tagVersion.zip"
           Compress-Archive -Path "release_pkg\*" -DestinationPath "Output\$zipName" -Force
-          Write-Host "Portable ZIP created: Output\$zipName"
 
-      - name: Prepare Versioned Artifact Name
+      - name: Prepare Final Versioned Names
         id: prep_name
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          ORIGINAL_NAME="${{ matrix.artifact }}"
-          
-          if [[ "$ORIGINAL_NAME" == *.tar.gz ]]; then
-            FINAL_NAME="${ORIGINAL_NAME%.tar.gz}.tar-${VERSION}.gz"
-          else
-            FINAL_NAME="${ORIGINAL_NAME%.exe}-${VERSION}.exe"
+          cd Output
+          if [ -f "whitelang-${{ matrix.os_name }}.tar.gz" ]; then
+            mv "whitelang-${{ matrix.os_name }}.tar.gz" "whitelang-${{ matrix.os_name }}-${VERSION}.tar.gz"
           fi
-
-          mv Output/"$ORIGINAL_NAME" Output/"$FINAL_NAME"
-          echo "final_name=$FINAL_NAME" >> $GITHUB_OUTPUT
 
       - name: Upload Artifact to Release
         uses: softprops/action-gh-release@v1
@@ -338,12 +345,10 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           PHASE_VER="${{ github.ref_name }}"
-
           aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/${PHASE_VER}/ \
             --exclude "*Portable*" \
             --delete \
             --endpoint-url ${{ secrets.R2_ENDPOINT }}
-
           aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/latest/ \
             --exclude "*Portable*" \
             --delete \
