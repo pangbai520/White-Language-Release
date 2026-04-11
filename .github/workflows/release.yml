@@ -167,15 +167,16 @@ jobs:
           curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
           mkdir -p llvm_tmp
           tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
-          mkdir -p release_pkg/tools/llvm
-          cp -r llvm_tmp/* release_pkg/tools/llvm/
-          rm -rf llvm_tmp
-
-          if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
-            echo "Removing conflicting libraries on macOS..."
-            rm -f release_pkg/tools/llvm/lib/libc++*
-            rm -f release_pkg/tools/llvm/lib/libLLVM*
-          fi
+          
+          mkdir -p release_pkg/tools/llvm/bin
+          mkdir -p release_pkg/tools/llvm/lib
+          
+          cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
+          cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
+          
+          rm -rf llvm_tmp llvm.tar.xz
 
       - name: "[Unix] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -202,24 +203,17 @@ jobs:
           boot_env/bin/wlc source_repo/src/wlc.wl -o release_pkg/bin/wlc -O3
           release_pkg/tools/llvm/bin/clang -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.o -O2
 
-      - name: "[Unix] Trim LLVM (Cleanup)"
+      - name: "[Unix] Trim LLVM (Strip Symbols)"
         if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
         run: |
-          LLVM_DIR="$PWD/release_pkg/tools/llvm"
-          
-          if [ -d "$LLVM_DIR" ]; then
-            cd "$LLVM_DIR"
-            echo "Trimming LLVM at $LLVM_DIR"
-            find bin -type f ! -name "clang*" ! -name "ld.lld" ! -name "lld" -delete
-            rm -rf include share
-            find lib -maxdepth 1 -type f -name "*.dylib" -delete
-            find lib -maxdepth 1 -type f -name "*.a" -delete
-            
-            echo "Trim complete. Remaining size:"
-            du -sh .
-          else
-            echo "::warning::LLVM directory not found, skipping trim."
+          LLVM_BIN="release_pkg/tools/llvm/bin"
+          if [ -d "$LLVM_BIN" ]; then
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+              strip -x $LLVM_BIN/* 2>/dev/null || true
+            else
+              strip --strip-unneeded $LLVM_BIN/* 2>/dev/null || true
+            fi
           fi
 
       - name: Run Automated Test Suite
