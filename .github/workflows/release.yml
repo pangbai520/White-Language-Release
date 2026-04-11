@@ -112,7 +112,7 @@ jobs:
 
           LLVM_DIR="release_pkg/tools/llvm"
 
-          [ -f "source_repo/wlc.rc" ] && $LLVM_DIR/bin/windres source_repo/wlc.rc -O coff -o wlc_icon.res || true
+          [ -f "wlc.rc" ] && $LLVM_DIR/bin/windres wlc.rc -O coff -o wlc_icon.res || true
           ICON=$([ -f "wlc_icon.res" ] && echo "wlc_icon.res" || echo "")
 
           "$WLC_EXE" source_repo/src/wlc.wl $ICON -o release_pkg/bin/wlc.exe -O3
