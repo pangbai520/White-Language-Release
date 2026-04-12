@@ -226,7 +226,7 @@ jobs:
           WLC="$PWD/release_pkg/bin/wlc"
           [ -f "${WLC}.exe" ] && WLC="${WLC}.exe"
           
-          TESTS=$(find source_repo/tests -type f -name "*.wl" | grep -v "/failure/" | grep -v "/integration/")
+          TESTS=$(find source_repo/tests -type f -name "*.wl" | grep -v "/failure/" | grep -v "/fixtures/")
           ERRORS=0
           FAILED_FILES=()
 
