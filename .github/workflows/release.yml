@@ -104,6 +104,9 @@ jobs:
 
           unzip -q boot_dl/*.zip -d boot_env
 
+          rm -rf boot_env/std
+          cp -r source_repo/std boot_env/std
+
           export WL_PATH="$PWD/boot_env"
 
           WLC_EXE=$(find boot_env -name wlc.exe)
@@ -192,6 +195,8 @@ jobs:
             --dir boot_dl --clobber
 
           tar -xzf boot_dl/*.tar.gz -C boot_env
+          rm -rf boot_env/std
+          cp -r source_repo/std boot_env/std
           export WL_PATH="$PWD/boot_env"
           chmod +x boot_env/bin/wlc
           
