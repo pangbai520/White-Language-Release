@@ -60,6 +60,7 @@ jobs:
           repository: 'pangbai520/White-Language'
           path: 'source_repo'
           ref: ${{ env.TARGET_REF }}
+          fetch-depth: 0 
 
       - name: Create Package Layout
         shell: bash
@@ -67,7 +68,8 @@ jobs:
           mkdir -p release_pkg/bin
           mkdir -p release_pkg/runtime
           mkdir -p release_pkg/tools/llvm/bin
-          cp -r source_repo/std release_pkg/
+          mkdir -p Output Output_Snapshots
+          mkdir -p release_pkg/std
 
       - name: Fetch Latest LLVM Release URL
         id: get_llvm
@@ -92,35 +94,61 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p boot_env
-          gh release download \
-            -R ${{ github.repository }} \
-            --pattern "WhiteLanguage-Windows-x64-Portable-*.zip" \
-            --dir boot_dl \
-            --clobber
-
-          echo "Downloaded files:"
-          ls -R boot_dl || true
-
+          mkdir -p boot_env boot_dl
+          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts | grep -v "${{ github.ref_name }}" | head -n 1 | awk '{print $1}')
+          
+          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-x64-Portable-*.zip" --dir boot_dl --clobber
           unzip -q boot_dl/*.zip -d boot_env
 
-          rm -rf boot_env/std
-          cp -r source_repo/std boot_env/std
+          cd source_repo
+          VERSION_NO_V="${GITHUB_REF_NAME#v}"
+          COMMITS=$(git rev-list --reverse ${PREV_TAG}..${{ github.ref_name }})
+          FINAL_COMMIT=$(git rev-parse "${{ github.ref_name }}^{commit}")
 
-          export WL_PATH="$PWD/boot_env"
+          GLOBAL_LLVM_BIN=$(cygpath -m "$PWD/../release_pkg/tools/llvm/bin")
+          export PATH="$GLOBAL_LLVM_BIN:$PATH"
 
-          WLC_EXE=$(find boot_env -name wlc.exe)
-          echo "Found wlc at: $WLC_EXE"
+          ACTIVE_WLC=$(cygpath -m "$(find "$PWD/../boot_env" -name wlc.exe | head -n 1)")
+          ACTIVE_ENV=$(cygpath -m "$(dirname $(dirname "$ACTIVE_WLC"))")
+          GLOBAL_LLVM_BIN=$(cygpath -m "$PWD/../release_pkg/tools/llvm/bin")
 
-          LLVM_DIR="release_pkg/tools/llvm"
+          for COMMIT in $COMMITS; do
+            SHORT_SHA=$(git rev-parse --short $COMMIT)
+            echo "------------------------------------------------"
+            echo "Bootstrapping Commit: $SHORT_SHA"
+            git checkout $COMMIT
 
-          [ -f "wlc.rc" ] && $LLVM_DIR/bin/windres wlc.rc -O coff -o wlc_icon.res || true
-          ICON=$([ -f "wlc_icon.res" ] && echo "wlc_icon.res" || echo "")
+            cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
 
-          "$WLC_EXE" source_repo/src/wlc.wl $ICON -o release_pkg/bin/wlc.exe -O3
+            export WL_PATH="$ACTIVE_ENV"
+            mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
 
-          release_pkg/tools/llvm/bin/clang.exe -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.obj -O2
-      
+            cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
+
+            [ -f "src/wlc.rc" ] && "$GLOBAL_LLVM_BIN/windres.exe" src/wlc.rc -O coff -o ../wlc_icon.res || true
+            ICON=$([ -f "../wlc_icon.res" ] && echo "../wlc_icon.res" || echo "")
+
+            "$ACTIVE_WLC" src/wlc.wl $ICON -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+            "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o ../build_${SHORT_SHA}/runtime/wl_runtime.obj -O2
+
+            cp -r std/* ../build_${SHORT_SHA}/std/
+
+            ACTIVE_WLC=$(cygpath -m "$PWD/../build_${SHORT_SHA}/bin/wlc.exe")
+            ACTIVE_ENV=$(cygpath -m "$PWD/../build_${SHORT_SHA}")
+
+            if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
+              cp "$ACTIVE_WLC" ../release_pkg/bin/
+              cp ../build_${SHORT_SHA}/runtime/wl_runtime.obj ../release_pkg/runtime/
+              cp -r std/* ../release_pkg/std/
+            else
+              SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
+              cd ../build_${SHORT_SHA}
+              7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip bin std runtime > /dev/null
+              cd ../source_repo
+            fi
+          done
+          git checkout ${{ env.TARGET_REF }}
+
       - name: "[Windows] Trim LLVM (Cleanup)"
         if: startsWith(matrix.os_name, 'windows')
         shell: bash
@@ -189,23 +217,58 @@ jobs:
           mkdir -p boot_env boot_dl
           PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts | grep -v "${{ github.ref_name }}" | head -n 1 | awk '{print $1}')
           
-          gh release download "$PREV_TAG" \
-            -R ${{ github.repository }} \
-            --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" \
-            --dir boot_dl --clobber
-
+          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" --dir boot_dl --clobber
           tar -xzf boot_dl/*.tar.gz -C boot_env
-          rm -rf boot_env/std
-          cp -r source_repo/std boot_env/std
-          export WL_PATH="$PWD/boot_env"
-          chmod +x boot_env/bin/wlc
           
+          cd source_repo
+          VERSION_NO_V="${GITHUB_REF_NAME#v}"
+          COMMITS=$(git rev-list --reverse ${PREV_TAG}..${{ github.ref_name }})
+          FINAL_COMMIT=$(git rev-parse "${{ github.ref_name }}^{commit}")
+
+          GLOBAL_LLVM_BIN="$PWD/../release_pkg/tools/llvm/bin"
+          export PATH="$GLOBAL_LLVM_BIN:$PATH"
+
+          ACTIVE_WLC="$PWD/../boot_env/bin/wlc"
+          ACTIVE_ENV="$PWD/../boot_env"
+          chmod +x "$ACTIVE_WLC"
+
           if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
             export SDKROOT=$(xcrun --show-sdk-path)
           fi
-          
-          boot_env/bin/wlc source_repo/src/wlc.wl -o release_pkg/bin/wlc -O3
-          release_pkg/tools/llvm/bin/clang -c source_repo/runtime/wl_runtime.c -o release_pkg/runtime/wl_runtime.o -O2
+
+          for COMMIT in $COMMITS; do
+            SHORT_SHA=$(git rev-parse --short $COMMIT)
+            echo "------------------------------------------------"
+            echo "Bootstrapping Commit: $SHORT_SHA"
+            git checkout $COMMIT
+
+            cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
+
+            export WL_PATH="$ACTIVE_ENV"
+            mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
+
+            cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
+
+            "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
+            "../release_pkg/tools/llvm/bin/clang" -c runtime/wl_runtime.c -o ../build_${SHORT_SHA}/runtime/wl_runtime.o -O2
+
+            cp -r std/* ../build_${SHORT_SHA}/std/
+
+            ACTIVE_WLC="$PWD/../build_${SHORT_SHA}/bin/wlc"
+            ACTIVE_ENV="$PWD/../build_${SHORT_SHA}"
+
+            if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
+              cp "$ACTIVE_WLC" ../release_pkg/bin/
+              cp ../build_${SHORT_SHA}/runtime/wl_runtime.o ../release_pkg/runtime/
+              cp -r std/* ../release_pkg/std/
+            else
+              SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
+              cd ../build_${SHORT_SHA}
+              tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz bin std runtime
+              cd ../source_repo
+            fi
+          done
+          git checkout ${{ env.TARGET_REF }}
 
       - name: "[Unix] Trim LLVM (Strip Symbols)"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -286,7 +349,6 @@ jobs:
         if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
         run: |
-          mkdir -p Output
           cd release_pkg
           tar -czf ../Output/${{ matrix.artifact }} .
 
@@ -294,7 +356,6 @@ jobs:
         if: startsWith(matrix.os_name, 'windows')
         shell: pwsh
         run: |
-          mkdir -Force Output
           $tagVersion = "${{ github.ref_name }}".TrimStart('v')
           $zipName = "WhiteLanguage-Windows-x64-Portable-$tagVersion.zip"
           Compress-Archive -Path "release_pkg\*" -DestinationPath "Output\$zipName" -Force
@@ -309,11 +370,20 @@ jobs:
             mv "whitelang-${{ matrix.os_name }}.tar.gz" "whitelang-${{ matrix.os_name }}-${VERSION}.tar.gz"
           fi
 
-      - name: Upload Artifact to Release
+      - name: Upload Final Artifacts to Main Release
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: Output/*
+
+      - name: Upload Snapshots to Separate Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: ${{ github.ref_name }}-snapshots
+          name: snapshots-${{ github.ref_name }}
+          prerelease: true
+          files: Output_Snapshots/*
 
       - name: Stash for latest promotion
         uses: actions/upload-artifact@v4
