@@ -283,10 +283,26 @@ jobs:
             fi
           fi
 
+      - name: Set up MinGW (Windows only)
+        uses: egor-tensin/setup-mingw@v2
+        if: startsWith(matrix.os_name, 'windows')
+        with:
+          platform: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Run Automated Test Suite
         shell: bash
         run: |
-          export WL_PATH="$PWD/release_pkg"
+          if [[ "${{ matrix.os_name }}" == *"windows"* ]]; then
+            export WL_PATH=$(cygpath -m "$PWD/release_pkg")
+          else
+            export WL_PATH="$PWD/release_pkg"
+          fi
+          
           if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
             export SDKROOT=$(xcrun --show-sdk-path)
           fi
@@ -294,35 +310,79 @@ jobs:
           WLC="$PWD/release_pkg/bin/wlc"
           [ -f "${WLC}.exe" ] && WLC="${WLC}.exe"
           
-          TESTS=$(find source_repo/tests -type f -name "*.wl" | grep -v "/failure/" | grep -v "/fixtures/")
+          TESTS=$(find source_repo/tests -type f -name "*.wl" | grep -v "/failure/" | grep -v "/fixtures/" | grep -v "/ffi/.*_host\.wl")
           ERRORS=0
           FAILED_FILES=()
 
           for file in $TESTS; do
+            echo "------------------------------------------"
             echo "Running test: $file"
-            
-            $WLC "$file" -o test_bin
-            if [ $? -ne 0 ]; then
-              echo "::error file=$file::Compilation Failed"
-              FAILED_FILES+=("[Compile Error] $file")
-              ERRORS=$((ERRORS+1))
-              continue
-            fi
-            
-            if [ -f "test_bin.exe" ]; then
-              OUTPUT=$(./test_bin.exe 2>&1 || true)
+
+            if [[ "$file" == *"/ffi/"* ]]; then
+              echo "[FFI Mode] Compiling shared library..."
+              dir_name=$(dirname "$file")
+              base_name=$(basename "$file")
+
+              pushd "$dir_name" > /dev/null
+              
+              "$WLC" "$base_name" --shared
+              if [ $? -ne 0 ]; then
+                echo "::error file=$file::FFI Library Compilation Failed"
+                FAILED_FILES+=("[FFI Compile Error] $file")
+                ERRORS=$((ERRORS+1))
+                popd > /dev/null
+                continue
+              fi
+
+              host_files=$(find . -maxdepth 1 -type f \( -name "*.c" -o -name "*.py" -o -name "*_host.wl" \))
+              for host_file in $host_files; do
+                cmd_to_run=$(grep -i "Compile:" "$host_file" | sed 's/.*Compile:[ \t]*//' | tr -d '\r')
+                if [ -n "$cmd_to_run" ]; then
+                  echo "Found host test: $host_file"
+                  echo "Executing: $cmd_to_run"
+
+                  if [[ "${{ matrix.os_name }}" == *"windows"* ]]; then
+                    export PATH=".:$PATH"
+                  elif [[ "${{ matrix.os_name }}" == "macos-arm64" ]]; then
+                    export DYLD_LIBRARY_PATH=".:$DYLD_LIBRARY_PATH"
+                  else
+                    export LD_LIBRARY_PATH=".:$LD_LIBRARY_PATH"
+                  fi
+                  
+                  eval "$cmd_to_run"
+                  if [ $? -ne 0 ]; then
+                    echo "::error file=$host_file::FFI Host Test Failed"
+                    FAILED_FILES+=("[FFI Runtime Error] $host_file")
+                    ERRORS=$((ERRORS+1))
+                  fi
+                fi
+              done
+              
+              popd > /dev/null
             else
-              OUTPUT=$(./test_bin 2>&1 || true)
+              $WLC "$file" -o test_bin
+              if [ $? -ne 0 ]; then
+                echo "::error file=$file::Compilation Failed"
+                FAILED_FILES+=("[Compile Error] $file")
+                ERRORS=$((ERRORS+1))
+                continue
+              fi
+              
+              if [ -f "test_bin.exe" ]; then
+                OUTPUT=$(./test_bin.exe 2>&1 || true)
+              else
+                OUTPUT=$(./test_bin 2>&1 || true)
+              fi
+              
+              if ! echo "$OUTPUT" | grep -q "PASS:"; then
+                echo "::error file=$file::Test Logic Failed"
+                echo "Output: $OUTPUT"
+                FAILED_FILES+=("[Runtime Error] $file")
+                ERRORS=$((ERRORS+1))
+              fi
+              
+              rm -f test_bin test_bin.exe
             fi
-            
-            if ! echo "$OUTPUT" | grep -q "PASS:"; then
-              echo "::error file=$file::Test Logic Failed"
-              echo "Output: $OUTPUT"
-              FAILED_FILES+=("[Runtime Error] $file")
-              ERRORS=$((ERRORS+1))
-            fi
-            
-            rm -f test_bin test_bin test_bin.exe
           done
           
           if [ $ERRORS -ne 0 ]; then
