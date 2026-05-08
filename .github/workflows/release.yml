@@ -120,6 +120,8 @@ jobs:
 
             cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
 
+            "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
+
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
 
@@ -129,7 +131,8 @@ jobs:
             ICON=$([ -f "../wlc_icon.res" ] && echo "../wlc_icon.res" || echo "")
 
             "$ACTIVE_WLC" src/wlc.wl $ICON -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
-            "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o ../build_${SHORT_SHA}/runtime/wl_runtime.obj -O2
+
+            cp "$ACTIVE_ENV/runtime/wl_runtime.obj" ../build_${SHORT_SHA}/runtime/wl_runtime.obj
 
             cp -r std/* ../build_${SHORT_SHA}/std/
 
@@ -244,13 +247,16 @@ jobs:
 
             cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
 
+            "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.o" -O2
+
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
 
             cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
 
             "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
-            "../release_pkg/tools/llvm/bin/clang" -c runtime/wl_runtime.c -o ../build_${SHORT_SHA}/runtime/wl_runtime.o -O2
+
+            cp "$ACTIVE_ENV/runtime/wl_runtime.o" ../build_${SHORT_SHA}/runtime/wl_runtime.o
 
             cp -r std/* ../build_${SHORT_SHA}/std/
 
