@@ -100,6 +100,17 @@ jobs:
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-x64-Portable-*.zip" --dir boot_dl --clobber
           unzip -q boot_dl/*.zip -d boot_env
 
+          GLOBAL_LLVM_BIN_ROOT=$(cygpath -m "$PWD/release_pkg/tools/llvm/bin")
+          rm -f wlc_icon.res
+          if [ -f "wlc.rc" ]; then
+            "$GLOBAL_LLVM_BIN_ROOT/windres.exe" wlc.rc -O coff -o wlc_icon.res || true
+          fi
+
+          ICON_PATH_ABS=""
+          if [ -f "wlc_icon.res" ]; then
+            ICON_PATH_ABS=$(cygpath -m "$PWD/wlc_icon.res")
+          fi
+
           cd source_repo
           VERSION_NO_V="${GITHUB_REF_NAME#v}"
           COMMITS=$(git rev-list --reverse ${PREV_TAG}..${{ github.ref_name }})
@@ -110,7 +121,6 @@ jobs:
 
           ACTIVE_WLC=$(cygpath -m "$(find "$PWD/../boot_env" -name wlc.exe | head -n 1)")
           ACTIVE_ENV=$(cygpath -m "$(dirname $(dirname "$ACTIVE_WLC"))")
-          GLOBAL_LLVM_BIN=$(cygpath -m "$PWD/../release_pkg/tools/llvm/bin")
 
           for COMMIT in $COMMITS; do
             SHORT_SHA=$(git rev-parse --short $COMMIT)
@@ -119,21 +129,20 @@ jobs:
             git checkout $COMMIT
 
             cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-
             "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
 
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
-
             cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
 
-            [ -f "src/wlc.rc" ] && "$GLOBAL_LLVM_BIN/windres.exe" src/wlc.rc -O coff -o ../wlc_icon.res || true
-            ICON=$([ -f "../wlc_icon.res" ] && echo "../wlc_icon.res" || echo "")
+            ICON_ARG=""
+            if [ -n "$ICON_PATH_ABS" ]; then
+              ICON_ARG="\"$ICON_PATH_ABS\""
+            fi
 
-            "$ACTIVE_WLC" src/wlc.wl $ICON -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+            "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
 
             cp "$ACTIVE_ENV/runtime/wl_runtime.obj" ../build_${SHORT_SHA}/runtime/wl_runtime.obj
-
             cp -r std/* ../build_${SHORT_SHA}/std/
 
             ACTIVE_WLC=$(cygpath -m "$PWD/../build_${SHORT_SHA}/bin/wlc.exe")
