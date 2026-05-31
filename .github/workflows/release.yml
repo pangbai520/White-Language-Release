@@ -80,13 +80,33 @@ jobs:
           URL=$(gh release view --repo ${{ matrix.llvm_repo }} --json assets -q '[.assets[] | select(.name | contains("${{ matrix.asset_keyword }}")) | .url] | .[0]')
           echo "url=$URL" >> $GITHUB_OUTPUT
 
+      - name: Cache LLVM Toolchain
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: release_pkg/tools/llvm
+          key: llvm-toolchain-${{ matrix.os_name }}-${{ steps.get_llvm.outputs.url }}
+
       - name: "[Windows] Fetch LLVM"
-        if: startsWith(matrix.os_name, 'windows')
+        if: startsWith(matrix.os_name, 'windows') && steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           curl -L -o llvm.zip ${{ steps.get_llvm.outputs.url }}
           unzip -q llvm.zip
           cp -r llvm-mingw-*/* release_pkg/tools/llvm/
+
+      - name: "[Unix] Fetch LLVM"
+        if: startsWith(matrix.os_name, 'windows') == false && steps.cache-llvm.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
+          mkdir -p llvm_tmp
+          tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
+          cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
+          cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
+          rm -rf llvm_tmp llvm.tar.xz
 
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows')
@@ -128,7 +148,7 @@ jobs:
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
 
-            cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
+            cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
             "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
 
             export WL_PATH="$ACTIVE_ENV"
@@ -166,7 +186,7 @@ jobs:
         shell: bash
         run: |
           LLVM_DIR="release_pkg/tools/llvm"
-          
+
           rm -rf $LLVM_DIR/python $LLVM_DIR/busybox $LLVM_DIR/share $LLVM_DIR/include $LLVM_DIR/LICENSE.TXT
           rm -rf $LLVM_DIR/aarch64-w64-mingw32 $LLVM_DIR/arm64ec-w64-mingw32 $LLVM_DIR/armv7-w64-mingw32 $LLVM_DIR/i686-w64-mingw32
           rm -rf $LLVM_DIR/x86_64-w64-mingw32/share $LLVM_DIR/x86_64-w64-mingw32/bin
@@ -202,24 +222,6 @@ jobs:
           rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libvss*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbluetooth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libwlan*.a
           rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libiis*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptui*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptxml*.a
 
-      - name: "[Unix] Fetch LLVM"
-        if: startsWith(matrix.os_name, 'windows') == false
-        shell: bash
-        run: |
-          curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
-          mkdir -p llvm_tmp
-          tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
-          
-          mkdir -p release_pkg/tools/llvm/bin
-          mkdir -p release_pkg/tools/llvm/lib
-          
-          cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
-          cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
-          
-          rm -rf llvm_tmp llvm.tar.xz
-
       - name: "[Unix] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
@@ -254,7 +256,7 @@ jobs:
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
 
-            cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
+            cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
 
             "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.o" -O2
 
@@ -406,6 +408,15 @@ jobs:
           name: assets-${{ matrix.os_name }}
           path: Output/
           retention-days: 1
+
+      - name: Cleanup Tag on Failure
+        if: failure() && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Workflow failed! Deleting tag ${{ github.ref_name }} from remote..."
+          git push --delete origin ${{ github.ref_name }} || true
 
   promote-to-r2:
     name: Sync Assets to Cloudflare R2
