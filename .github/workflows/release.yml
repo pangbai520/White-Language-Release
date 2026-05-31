@@ -85,7 +85,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: release_pkg/tools/llvm
-          key: llvm-toolchain-${{ matrix.os_name }}-${{ steps.get_llvm.outputs.url }}
+          key: llvm-toolchain-v3-${{ matrix.os_name }}-${{ steps.get_llvm.outputs.url }}
 
       - name: "[Windows] Fetch LLVM"
         if: startsWith(matrix.os_name, 'windows') && steps.cache-llvm.outputs.cache-hit != 'true'
@@ -95,17 +95,36 @@ jobs:
           unzip -q llvm.zip
           cp -r llvm-mingw-*/* release_pkg/tools/llvm/
 
-      - name: "[Unix] Fetch LLVM"
-        if: startsWith(matrix.os_name, 'windows') == false && steps.cache-llvm.outputs.cache-hit != 'true'
+      - name: "[macOS] Fetch LLVM"
+        if: matrix.os_name == 'macos-arm64' && steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
           mkdir -p llvm_tmp
           tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
+          
+          mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
           cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
           cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
+          
+          rm -rf llvm_tmp llvm.tar.xz
+
+      - name: "[Linux] Fetch LLVM"
+        if: matrix.os_name == 'linux-x64' && steps.cache-llvm.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
+          mkdir -p llvm_tmp
+          tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
+          
+          mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
+          cp -a llvm_tmp/bin/clang llvm_tmp/bin/clang-[0-9]* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_tmp/bin/ld.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_tmp/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
+          
           rm -rf llvm_tmp llvm.tar.xz
 
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
@@ -186,7 +205,7 @@ jobs:
         shell: bash
         run: |
           LLVM_DIR="release_pkg/tools/llvm"
-
+          
           rm -rf $LLVM_DIR/python $LLVM_DIR/busybox $LLVM_DIR/share $LLVM_DIR/include $LLVM_DIR/LICENSE.TXT
           rm -rf $LLVM_DIR/aarch64-w64-mingw32 $LLVM_DIR/arm64ec-w64-mingw32 $LLVM_DIR/armv7-w64-mingw32 $LLVM_DIR/i686-w64-mingw32
           rm -rf $LLVM_DIR/x86_64-w64-mingw32/share $LLVM_DIR/x86_64-w64-mingw32/bin
@@ -310,8 +329,7 @@ jobs:
           
           WLC="$PWD/release_pkg/bin/wlc"
           [ -f "${WLC}.exe" ] && WLC="${WLC}.exe"
-          
-          TESTS=$(find source_repo/tests -type f -name "*.wl" ! -path "*/ffi/*" ! -path "*/failure/*" ! -path "*/fixtures/*")
+          TESTS=$(find source_repo/tests -type f -name "*.wl" ! -path "*/ffi/*" ! -path "*/failure/*" ! -path "*/failures/*" ! -path "*/fixtures/*")
           ERRORS=0
           FAILED_FILES=()
 
