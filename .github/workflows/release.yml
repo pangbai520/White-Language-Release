@@ -166,6 +166,7 @@ jobs:
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
+            cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
 
             cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
             "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
@@ -179,7 +180,17 @@ jobs:
               ICON_ARG="\"$ICON_PATH_ABS\""
             fi
 
-            "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+            echo "Trying aggressive build with overwritten std..."
+            if ! "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3; then
+              echo "Aggressive build failed (likely syntax mismatch). Rolling back..."
+              rm -rf "$ACTIVE_ENV/std"
+              mv "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/std"
+              cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
+              "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+            else
+              echo "Aggressive build succeeded."
+              rm -rf "$ACTIVE_ENV/std_backup"
+            fi
 
             cp "$ACTIVE_ENV/runtime/wl_runtime.obj" ../build_${SHORT_SHA}/runtime/wl_runtime.obj
             cp -r std/* ../build_${SHORT_SHA}/std/
@@ -274,20 +285,28 @@ jobs:
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
+            cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
 
             cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-
             "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.o" -O2
 
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
-
             cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
 
-            "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
+            echo "Trying aggressive build with overwritten std..."
+            if ! "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3; then
+              echo "Aggressive build failed (likely syntax mismatch). Rolling back..."
+              rm -rf "$ACTIVE_ENV/std"
+              mv "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/std"
+              cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
+              "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
+            else
+              echo "Aggressive build succeeded."
+              rm -rf "$ACTIVE_ENV/std_backup"
+            fi
 
             cp "$ACTIVE_ENV/runtime/wl_runtime.o" ../build_${SHORT_SHA}/runtime/wl_runtime.o
-
             cp -r std/* ../build_${SHORT_SHA}/std/
 
             ACTIVE_WLC="$PWD/../build_${SHORT_SHA}/bin/wlc"
