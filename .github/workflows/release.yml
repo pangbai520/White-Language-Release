@@ -107,6 +107,7 @@ jobs:
           cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
           cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp llvm_tmp/bin/llvm-objdump release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
           
           rm -rf llvm_tmp llvm.tar.xz
@@ -123,6 +124,7 @@ jobs:
           cp -a llvm_tmp/bin/clang llvm_tmp/bin/clang-[0-9]* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_tmp/bin/ld.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_tmp/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_tmp/bin/llvm-objdump* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
           
           rm -rf llvm_tmp llvm.tar.xz
@@ -134,8 +136,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p boot_env boot_dl
-          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts | grep -v "${{ github.ref_name }}" | head -n 1 | awk '{print $1}')
+          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
           
+          if [ -z "$PREV_TAG" ]; then
+            echo "::error::Could not find a valid previous release tag to bootstrap from. Did you delete old releases?"
+            exit 1
+          fi
+          
+          echo "Bootstrapping from previous release: $PREV_TAG"
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-x64-Portable-*.zip" --dir boot_dl --clobber
           unzip -q boot_dl/*.zip -d boot_env
 
@@ -211,6 +219,45 @@ jobs:
           done
           git checkout ${{ env.TARGET_REF }}
 
+          echo "================================================"
+          echo " Starting Compiler Idempotency Check (Assembly)"
+          echo "================================================"
+          export WL_PATH=$(cygpath -m "$PWD/../release_pkg")
+          OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump.exe"
+          WLC_CURRENT=$(cygpath -m "$PWD/../release_pkg/bin/wlc.exe")
+          WLC_NEXT=$(cygpath -m "$PWD/../release_pkg/bin/wlc_next.exe")
+
+          clean_objdump() {
+            "$OBJDUMP_CMD" -d "$1" | awk '!/file format/ && NF' > "$2"
+          }
+
+          clean_objdump "$WLC_CURRENT" "../wlc_current.asm"
+          
+          MATCH=false
+          for TRY in 1 2 3; do
+            echo "Fixpoint Try #$TRY..."
+            "$WLC_CURRENT" src/wlc.wl $ICON_ARG -o "$WLC_NEXT" -O3
+            clean_objdump "$WLC_NEXT" "../wlc_next.asm"
+
+            if diff -u "../wlc_current.asm" "../wlc_next.asm" > ../diff.log; then
+              echo "Assembly strictly matches! Fixpoint reached at try #$TRY."
+              MATCH=true
+              mv -f "$WLC_NEXT" "$WLC_CURRENT"
+              break
+            else
+              echo "Assembly mismatch on try #$TRY. Diff preview (first 20 lines):"
+              head -n 20 ../diff.log
+              mv -f "$WLC_NEXT" "$WLC_CURRENT"
+              mv -f "../wlc_next.asm" "../wlc_current.asm"
+            fi
+          done
+
+          rm -f ../wlc_current.asm ../wlc_next.asm ../diff.log
+          if [ "$MATCH" = false ]; then
+            echo "::error::Compiler failed to reach fixpoint after 3 tries. Assembly still diverges!"
+            exit 1
+          fi
+
       - name: "[Windows] Trim LLVM (Cleanup)"
         if: startsWith(matrix.os_name, 'windows')
         shell: bash
@@ -259,8 +306,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p boot_env boot_dl
-          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts | grep -v "${{ github.ref_name }}" | head -n 1 | awk '{print $1}')
+          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
           
+          if [ -z "$PREV_TAG" ]; then
+            echo "::error::Could not find a valid previous release tag to bootstrap from. Did you delete old releases?"
+            exit 1
+          fi
+          
+          echo "Bootstrapping from previous release: $PREV_TAG"
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" --dir boot_dl --clobber
           tar -xzf boot_dl/*.tar.gz -C boot_env
           
@@ -325,12 +378,52 @@ jobs:
           done
           git checkout ${{ env.TARGET_REF }}
 
+          echo "================================================"
+          echo " Starting Compiler Idempotency Check (Assembly)"
+          echo "================================================"
+          export WL_PATH="$PWD/../release_pkg"
+          OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump"
+          WLC_CURRENT="$PWD/../release_pkg/bin/wlc"
+          WLC_NEXT="$PWD/../release_pkg/bin/wlc_next"
+          
+          clean_objdump() {
+            "$OBJDUMP_CMD" -d "$1" | awk '!/file format/ && NF' > "$2"
+          }
+
+          clean_objdump "$WLC_CURRENT" "../wlc_current.asm"
+          
+          MATCH=false
+          for TRY in 1 2 3; do
+            echo "Fixpoint Try #$TRY..."
+            "$WLC_CURRENT" src/wlc.wl -o "$WLC_NEXT" -O3
+            clean_objdump "$WLC_NEXT" "../wlc_next.asm"
+
+            if diff -u "../wlc_current.asm" "../wlc_next.asm" > ../diff.log; then
+              echo "Assembly strictly matches! Fixpoint reached at try #$TRY."
+              MATCH=true
+              mv -f "$WLC_NEXT" "$WLC_CURRENT"
+              break
+            else
+              echo "Assembly mismatch on try #$TRY. Diff preview (first 20 lines):"
+              head -n 20 ../diff.log
+              mv -f "$WLC_NEXT" "$WLC_CURRENT"
+              mv -f "../wlc_next.asm" "../wlc_current.asm"
+            fi
+          done
+
+          rm -f ../wlc_current.asm ../wlc_next.asm ../diff.log
+          if [ "$MATCH" = false ]; then
+            echo "::error::Compiler failed to reach fixpoint after 3 tries. Assembly still diverges!"
+            exit 1
+          fi
+
       - name: "[Unix] Trim LLVM (Strip Symbols)"
         if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
         run: |
           LLVM_BIN="release_pkg/tools/llvm/bin"
           if [ -d "$LLVM_BIN" ]; then
+            rm -f $LLVM_BIN/llvm-objdump*
             if [[ "$OSTYPE" == "darwin"* ]]; then
               strip -x $LLVM_BIN/* 2>/dev/null || true
             else
