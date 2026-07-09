@@ -139,7 +139,7 @@ jobs:
           PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
           
           if [ -z "$PREV_TAG" ]; then
-            echo "::error::Could not find a valid previous release tag to bootstrap from. Did you delete old releases?"
+            echo "::error::Could not find a valid previous release tag to bootstrap from."
             exit 1
           fi
           
@@ -175,6 +175,7 @@ jobs:
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
+            cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"
 
             cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
             "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
@@ -188,16 +189,27 @@ jobs:
               ICON_ARG="\"$ICON_PATH_ABS\""
             fi
 
-            echo "Trying aggressive build with overwritten std..."
+            echo "Trying aggressive build with new std & runtime..."
             if ! "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3; then
-              echo "Aggressive build failed (likely syntax mismatch). Rolling back..."
-              rm -rf "$ACTIVE_ENV/std"
+              echo "Aggressive build failed (likely missing C symbol or std syntax mismatch)."
+              echo "Rolling back to old std & runtime..."
+              
+              rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime"
               mv "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/std"
-              cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-              "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+              mv "$ACTIVE_ENV/runtime_backup" "$ACTIVE_ENV/runtime"
+              
+              "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3
+
+              echo "Stage 1 succeeded. Now applying new std & runtime for Stage 2..."
+              cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
+              "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
+              
+              "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+              rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe
+              echo "Stage 2 succeeded."
             else
               echo "Aggressive build succeeded."
-              rm -rf "$ACTIVE_ENV/std_backup"
+              rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
             fi
 
             cp "$ACTIVE_ENV/runtime/wl_runtime.obj" ../build_${SHORT_SHA}/runtime/wl_runtime.obj
@@ -226,7 +238,6 @@ jobs:
           OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump.exe"
           WLC_CURRENT=$(cygpath -m "$PWD/../release_pkg/bin/wlc.exe")
           WLC_NEXT=$(cygpath -m "$PWD/../release_pkg/bin/wlc_next.exe")
-
           clean_objdump() {
             "$OBJDUMP_CMD" -d "$1" | awk '!/file format/ && NF' > "$2"
           }
@@ -257,6 +268,26 @@ jobs:
             echo "::error::Compiler failed to reach fixpoint after 3 tries. Assembly still diverges!"
             exit 1
           fi
+
+          echo ""
+          echo "================================================"
+          echo " Starting C Runtime Determinism Check (Assembly)"
+          echo "================================================"
+          RT_CURRENT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime.obj")
+          RT_NEXT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime_next.obj")
+          
+          clean_objdump "$RT_CURRENT" "../rt_current.asm"
+          "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
+          clean_objdump "$RT_NEXT" "../rt_next.asm"
+          
+          if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
+            echo "C Runtime assembly strictly matches! Deterministic build confirmed."
+          else
+            echo "::error::C Runtime assembly mismatch! Compilation is non-deterministic."
+            head -n 20 ../diff_rt.log
+            exit 1
+          fi
+          rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
 
       - name: "[Windows] Trim LLVM (Cleanup)"
         if: startsWith(matrix.os_name, 'windows')
@@ -309,7 +340,7 @@ jobs:
           PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
           
           if [ -z "$PREV_TAG" ]; then
-            echo "::error::Could not find a valid previous release tag to bootstrap from. Did you delete old releases?"
+            echo "::error::Could not find a valid previous release tag to bootstrap from."
             exit 1
           fi
           
@@ -339,6 +370,7 @@ jobs:
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
+            cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"
 
             cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
             "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.o" -O2
@@ -347,16 +379,27 @@ jobs:
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
             cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
 
-            echo "Trying aggressive build with overwritten std..."
+            echo "Trying aggressive build with new std & runtime..."
             if ! "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3; then
-              echo "Aggressive build failed (likely syntax mismatch). Rolling back..."
-              rm -rf "$ACTIVE_ENV/std"
+              echo "Aggressive build failed (likely missing C symbol or std syntax mismatch)."
+              echo "Stage 1: Rolling back to old std & runtime..."
+              
+              rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime"
               mv "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/std"
-              cp -n -r std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-              "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
+              mv "$ACTIVE_ENV/runtime_backup" "$ACTIVE_ENV/runtime"
+              
+              "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3
+
+              echo "Stage 1 succeeded. Now applying new std & runtime for Stage 2..."
+              cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
+              "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.o" -O2
+              
+              "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
+              rm -f ../build_${SHORT_SHA}/bin/wlc_temp
+              echo "Stage 2 succeeded."
             else
               echo "Aggressive build succeeded."
-              rm -rf "$ACTIVE_ENV/std_backup"
+              rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
             fi
 
             cp "$ACTIVE_ENV/runtime/wl_runtime.o" ../build_${SHORT_SHA}/runtime/wl_runtime.o
@@ -416,6 +459,26 @@ jobs:
             echo "::error::Compiler failed to reach fixpoint after 3 tries. Assembly still diverges!"
             exit 1
           fi
+
+          echo ""
+          echo "================================================"
+          echo " Starting C Runtime Determinism Check (Assembly)"
+          echo "================================================"
+          RT_CURRENT="$PWD/../release_pkg/runtime/wl_runtime.o"
+          RT_NEXT="$PWD/../release_pkg/runtime/wl_runtime_next.o"
+          
+          clean_objdump "$RT_CURRENT" "../rt_current.asm"
+          "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
+          clean_objdump "$RT_NEXT" "../rt_next.asm"
+          
+          if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
+            echo "C Runtime assembly strictly matches! Deterministic build confirmed."
+          else
+            echo "::error::C Runtime assembly mismatch! Compilation is non-deterministic."
+            head -n 20 ../diff_rt.log
+            exit 1
+          fi
+          rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
 
       - name: "[Unix] Trim LLVM (Strip Symbols)"
         if: startsWith(matrix.os_name, 'windows') == false
