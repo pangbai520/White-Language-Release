@@ -186,7 +186,7 @@ jobs:
 
             ICON_ARG=""
             if [ -n "$ICON_PATH_ABS" ]; then
-              ICON_ARG="\"$ICON_PATH_ABS\""
+              ICON_ARG="$ICON_PATH_ABS"
             fi
 
             echo "Trying aggressive build with new std & runtime..."
