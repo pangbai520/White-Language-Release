@@ -96,38 +96,48 @@ jobs:
           cp -r llvm-mingw-*/* release_pkg/tools/llvm/
 
       - name: "[macOS] Fetch LLVM"
-        if: matrix.os_name == 'macos-arm64' && steps.cache-llvm.outputs.cache-hit != 'true'
+        if: matrix.os_name == 'macos-arm64'
         shell: bash
         run: |
-          curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
-          mkdir -p llvm_tmp
-          tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
-          
-          mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
-          cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
-          cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp llvm_tmp/bin/llvm-objdump release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
-          
-          rm -rf llvm_tmp llvm.tar.xz
+          if [ ! -f "release_pkg/tools/llvm/bin/llvm-objdump" ]; then
+            echo "Missing llvm-objdump in cache. Forcing re-extraction..."
+            curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
+            mkdir -p llvm_tmp
+            tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
+            
+            mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
+            cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
+            cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
+            cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
+            cp llvm_tmp/bin/llvm-objdump release_pkg/tools/llvm/bin/ 2>/dev/null || true
+            cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
+            
+            rm -rf llvm_tmp llvm.tar.xz
+          else
+            echo "Cache is healthy. llvm-objdump found."
+          fi
 
-      - name: "[Linux] Fetch LLVM"
-        if: matrix.os_name == 'linux-x64' && steps.cache-llvm.outputs.cache-hit != 'true'
+      - name: "[Linux] Fetch LLVM (Force Fix)"
+        if: matrix.os_name == 'linux-x64'
         shell: bash
         run: |
-          curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
-          mkdir -p llvm_tmp
-          tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
-          
-          mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
-          cp -a llvm_tmp/bin/clang llvm_tmp/bin/clang-[0-9]* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp -a llvm_tmp/bin/ld.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp -a llvm_tmp/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp -a llvm_tmp/bin/llvm-objdump* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp -a llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
-          
-          rm -rf llvm_tmp llvm.tar.xz
+          if [ ! -f "release_pkg/tools/llvm/bin/llvm-objdump" ]; then
+            echo "Missing llvm-objdump in cache. Forcing re-extraction..."
+            curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
+            mkdir -p llvm_tmp
+            tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
+            
+            mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
+            cp -a llvm_tmp/bin/clang llvm_tmp/bin/clang-[0-9]* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+            cp -a llvm_tmp/bin/ld.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+            cp -a llvm_tmp/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+            cp -a llvm_tmp/bin/llvm-objdump* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+            cp -a llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
+            
+            rm -rf llvm_tmp llvm.tar.xz
+          else
+             echo "Cache is healthy. llvm-objdump found."
+          fi
 
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows')
@@ -177,8 +187,8 @@ jobs:
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
             cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"
 
-            cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-            "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
+
+            "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime_new.obj" -O2
 
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
@@ -189,28 +199,44 @@ jobs:
               ICON_ARG="$ICON_PATH_ABS"
             fi
 
-            echo "Trying aggressive build with new std & runtime..."
-            if ! "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3; then
-              echo "Aggressive build failed (likely missing C symbol or std syntax mismatch)."
-              echo "Rolling back to old std & runtime..."
-              
-              rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime"
-              mv "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/std"
-              mv "$ACTIVE_ENV/runtime_backup" "$ACTIVE_ENV/runtime"
-              
-              "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3
+            apply_env() {
+              rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime/wl_runtime.obj"
+              mkdir -p "$ACTIVE_ENV/std"
+              if [ "$1" == "new_std" ]; then cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true; else cp -a "$ACTIVE_ENV/std_backup/." "$ACTIVE_ENV/std/"; fi
+              if [ "$2" == "new_rt" ]; then cp "$ACTIVE_ENV/runtime/wl_runtime_new.obj" "$ACTIVE_ENV/runtime/wl_runtime.obj"; else cp "$ACTIVE_ENV/runtime_backup/wl_runtime.obj" "$ACTIVE_ENV/runtime/wl_runtime.obj"; fi
+            }
 
-              echo "Stage 1 succeeded. Now applying new std & runtime for Stage 2..."
-              cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-              "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.obj" -O2
-              
-              "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
-              rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe
-              echo "Stage 2 succeeded."
+            echo "Stage 1: Trying [New STD + New RT]..."
+            apply_env new_std new_rt
+            if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+              echo "[New STD + New RT] succeeded."
             else
-              echo "Aggressive build succeeded."
-              rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
+              echo "Failed. Trying [New STD + Old RT]..."
+              apply_env new_std old_rt
+              if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+                echo "[New STD + Old RT] succeeded."
+              else
+                echo "Failed. Trying [Old STD + New RT]..."
+                apply_env old_std new_rt
+                if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+                  echo "[Old STD + New RT] succeeded."
+                else
+                  echo "Failed. Trying [Old STD + Old RT]..."
+                  apply_env old_std old_rt
+                  if ! "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+                    echo "All fallback combinations failed!"
+                    exit 1
+                  fi
+                  echo "[Old STD + Old RT] succeeded."
+                fi
+              fi
             fi
+
+            echo "Stage 2: Finalizing with latest STD & RT..."
+            apply_env new_std new_rt
+            "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+            rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe "$ACTIVE_ENV/runtime/wl_runtime_new.obj"
+            rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
             cp "$ACTIVE_ENV/runtime/wl_runtime.obj" ../build_${SHORT_SHA}/runtime/wl_runtime.obj
             cp -r std/* ../build_${SHORT_SHA}/std/
@@ -369,38 +395,54 @@ jobs:
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
+
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
             cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"
 
-            cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-            "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.o" -O2
+            "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime_new.o" -O2
 
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
             cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
 
-            echo "Trying aggressive build with new std & runtime..."
-            if ! "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3; then
-              echo "Aggressive build failed (likely missing C symbol or std syntax mismatch)."
-              echo "Stage 1: Rolling back to old std & runtime..."
-              
-              rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime"
-              mv "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/std"
-              mv "$ACTIVE_ENV/runtime_backup" "$ACTIVE_ENV/runtime"
-              
-              "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3
+            apply_env() {
+              rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime/wl_runtime.o"
+              mkdir -p "$ACTIVE_ENV/std"
+              if [ "$1" == "new_std" ]; then cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true; else cp -a "$ACTIVE_ENV/std_backup/." "$ACTIVE_ENV/std/"; fi
+              if [ "$2" == "new_rt" ]; then cp "$ACTIVE_ENV/runtime/wl_runtime_new.o" "$ACTIVE_ENV/runtime/wl_runtime.o"; else cp "$ACTIVE_ENV/runtime_backup/wl_runtime.o" "$ACTIVE_ENV/runtime/wl_runtime.o"; fi
+            }
 
-              echo "Stage 1 succeeded. Now applying new std & runtime for Stage 2..."
-              cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true
-              "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime.o" -O2
-              
-              "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
-              rm -f ../build_${SHORT_SHA}/bin/wlc_temp
-              echo "Stage 2 succeeded."
+            echo "Stage 1: Trying [New STD + New RT]..."
+            apply_env new_std new_rt
+            if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+              echo "[New STD + New RT] succeeded."
             else
-              echo "Aggressive build succeeded."
-              rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
+              echo "Failed. Trying [New STD + Old RT]..."
+              apply_env new_std old_rt
+              if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+                echo "[New STD + Old RT] succeeded."
+              else
+                echo "Failed. Trying [Old STD + New RT]..."
+                apply_env old_std new_rt
+                if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+                  echo "[Old STD + New RT] succeeded."
+                else
+                  echo "Failed. Trying [Old STD + Old RT]..."
+                  apply_env old_std old_rt
+                  if ! "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+                    echo "All fallback combinations failed!"
+                    exit 1
+                  fi
+                  echo "[Old STD + Old RT] succeeded."
+                fi
+              fi
             fi
+
+            echo "Stage 2: Finalizing with latest STD & RT..."
+            apply_env new_std new_rt
+            "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
+            rm -f ../build_${SHORT_SHA}/bin/wlc_temp "$ACTIVE_ENV/runtime/wl_runtime_new.o"
+            rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
             cp "$ACTIVE_ENV/runtime/wl_runtime.o" ../build_${SHORT_SHA}/runtime/wl_runtime.o
             cp -r std/* ../build_${SHORT_SHA}/std/
