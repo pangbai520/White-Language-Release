@@ -208,22 +208,22 @@ jobs:
 
             echo "Stage 1: Trying [New STD + New RT]..."
             apply_env new_std new_rt
-            if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+            if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
               echo "[New STD + New RT] succeeded."
             else
               echo "Failed. Trying [New STD + Old RT]..."
               apply_env new_std old_rt
-              if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+              if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
                 echo "[New STD + Old RT] succeeded."
               else
                 echo "Failed. Trying [Old STD + New RT]..."
                 apply_env old_std new_rt
-                if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+                if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
                   echo "[Old STD + New RT] succeeded."
                 else
                   echo "Failed. Trying [Old STD + Old RT]..."
                   apply_env old_std old_rt
-                  if ! "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -O3; then
+                  if ! "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
                     echo "All fallback combinations failed!"
                     exit 1
                   fi
@@ -234,7 +234,7 @@ jobs:
 
             echo "Stage 2: Finalizing with latest STD & RT..."
             apply_env new_std new_rt
-            "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -O3
+            "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -Oz
             rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe "$ACTIVE_ENV/runtime/wl_runtime_new.obj"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
@@ -273,7 +273,7 @@ jobs:
           MATCH=false
           for TRY in 1 2 3; do
             echo "Fixpoint Try #$TRY..."
-            "$WLC_CURRENT" src/wlc.wl $ICON_ARG -o "$WLC_NEXT" -O3
+            "$WLC_CURRENT" src/wlc.wl $ICON_ARG -o "$WLC_NEXT" -Oz
             clean_objdump "$WLC_NEXT" "../wlc_next.asm"
 
             if diff -u "../wlc_current.asm" "../wlc_next.asm" > ../diff.log; then
@@ -414,22 +414,22 @@ jobs:
 
             echo "Stage 1: Trying [New STD + New RT]..."
             apply_env new_std new_rt
-            if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+            if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
               echo "[New STD + New RT] succeeded."
             else
               echo "Failed. Trying [New STD + Old RT]..."
               apply_env new_std old_rt
-              if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+              if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
                 echo "[New STD + Old RT] succeeded."
               else
                 echo "Failed. Trying [Old STD + New RT]..."
                 apply_env old_std new_rt
-                if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+                if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
                   echo "[Old STD + New RT] succeeded."
                 else
                   echo "Failed. Trying [Old STD + Old RT]..."
                   apply_env old_std old_rt
-                  if ! "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -O3; then
+                  if ! "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
                     echo "All fallback combinations failed!"
                     exit 1
                   fi
@@ -440,7 +440,7 @@ jobs:
 
             echo "Stage 2: Finalizing with latest STD & RT..."
             apply_env new_std new_rt
-            "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -O3
+            "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -Oz
             rm -f ../build_${SHORT_SHA}/bin/wlc_temp "$ACTIVE_ENV/runtime/wl_runtime_new.o"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
@@ -480,7 +480,7 @@ jobs:
           MATCH=false
           for TRY in 1 2 3; do
             echo "Fixpoint Try #$TRY..."
-            "$WLC_CURRENT" src/wlc.wl -o "$WLC_NEXT" -O3
+            "$WLC_CURRENT" src/wlc.wl -o "$WLC_NEXT" -Oz
             clean_objdump "$WLC_NEXT" "../wlc_next.asm"
 
             if diff -u "../wlc_current.asm" "../wlc_next.asm" > ../diff.log; then
