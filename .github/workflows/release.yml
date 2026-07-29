@@ -62,6 +62,20 @@ jobs:
           ref: ${{ env.TARGET_REF }}
           fetch-depth: 0 
 
+      - name: Remove Blacklisted Folders
+        shell: bash
+        run: |
+          BLACKLIST_DIRS="docs tools"
+          
+          echo "Applying blacklist deletions in source_repo..."
+          cd source_repo
+          for dir in $BLACKLIST_DIRS; do
+            if [ -e "$dir" ]; then
+              echo "Removing blacklisted item: $dir"
+              rm -rf "$dir"
+            fi
+          done
+
       - name: Create Package Layout
         shell: bash
         run: |
@@ -95,7 +109,7 @@ jobs:
           unzip -q llvm.zip
           cp -r llvm-mingw-*/* release_pkg/tools/llvm/
 
-      - name: "[macOS] Fetch LLVM"
+      - name: "[macOS] Fetch LLVM (Force Fix)"
         if: matrix.os_name == 'macos-arm64'
         shell: bash
         run: |
