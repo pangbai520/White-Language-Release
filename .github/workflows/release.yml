@@ -2,6 +2,8 @@ name: White Language Global Release Pipeline
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -10,8 +12,65 @@ permissions:
   contents: write
 
 jobs:
+  warm-llvm-cache:
+    name: Cache LLVM for ${{ matrix.os_name }}
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_name: windows-x64
+            runner: windows-latest
+            llvm_repo: mstorsjo/llvm-mingw
+            asset_keyword: ucrt-x86_64.zip
+            archive_name: llvm.zip
+
+          - os_name: macos-arm64
+            runner: macos-14
+            llvm_repo: llvm/llvm-project
+            asset_keyword: macOS-ARM64.tar.xz
+            archive_name: llvm.tar.xz
+
+          - os_name: linux-x64
+            runner: ubuntu-latest
+            llvm_repo: llvm/llvm-project
+            asset_keyword: Linux-X64.tar.xz
+            archive_name: llvm.tar.xz
+
+    steps:
+      - name: Find LLVM release asset
+        id: get_llvm
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          URL=$(gh release view --repo ${{ matrix.llvm_repo }} --json assets -q '[.assets[] | select(.name | contains("${{ matrix.asset_keyword }}")) | .url] | .[0]')
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "::error::No LLVM asset matched '${{ matrix.asset_keyword }}'."
+            exit 1
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Cache complete LLVM archive
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: .llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}
+          key: llvm-archive-v1-${{ matrix.os_name }}-${{ steps.get_llvm.outputs.url }}
+
+      - name: Download complete LLVM archive
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p ".llvm-cache/${{ matrix.os_name }}"
+          curl --fail --location --retry 3 --output ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}" "${{ steps.get_llvm.outputs.url }}"
+          test -s ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}"
+
   build-and-package:
     name: Build for ${{ matrix.os_name }}
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
 
     strategy:
@@ -23,20 +82,23 @@ jobs:
             artifact: WhiteLanguage-Windows-x64-Setup.exe
             llvm_repo: mstorsjo/llvm-mingw
             asset_keyword: ucrt-x86_64.zip
+            archive_name: llvm.zip
             target_arch: x86_64
-            
+
           - os_name: macos-arm64
             runner: macos-14
             artifact: whitelang-macos-arm64.tar.gz
             llvm_repo: llvm/llvm-project
             asset_keyword: macOS-ARM64.tar.xz
+            archive_name: llvm.tar.xz
             target_arch: aarch64
-            
+
           - os_name: linux-x64
             runner: ubuntu-latest
             artifact: whitelang-linux-x64.tar.gz
             llvm_repo: llvm/llvm-project
             asset_keyword: Linux-X64.tar.xz
+            archive_name: llvm.tar.xz
             target_arch: x86_64
 
     steps:
@@ -60,13 +122,13 @@ jobs:
           repository: 'pangbai520/White-Language'
           path: 'source_repo'
           ref: ${{ env.TARGET_REF }}
-          fetch-depth: 0 
+          fetch-depth: 0
 
       - name: Remove Blacklisted Folders
         shell: bash
         run: |
           BLACKLIST_DIRS="docs tools"
-          
+
           echo "Applying blacklist deletions in source_repo..."
           cd source_repo
           for dir in $BLACKLIST_DIRS; do
@@ -85,73 +147,69 @@ jobs:
           mkdir -p Output Output_Snapshots
           mkdir -p release_pkg/std
 
-      - name: Fetch Latest LLVM Release URL
+      - name: Find LLVM release asset
         id: get_llvm
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           URL=$(gh release view --repo ${{ matrix.llvm_repo }} --json assets -q '[.assets[] | select(.name | contains("${{ matrix.asset_keyword }}")) | .url] | .[0]')
-          echo "url=$URL" >> $GITHUB_OUTPUT
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "::error::No LLVM asset matched '${{ matrix.asset_keyword }}'."
+            exit 1
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
 
-      - name: Cache LLVM Toolchain
-        id: cache-llvm
-        uses: actions/cache@v4
+      - name: Restore complete LLVM archive
+        id: restore-llvm
+        uses: actions/cache/restore@v4
         with:
-          path: release_pkg/tools/llvm
-          key: llvm-toolchain-v3-${{ matrix.os_name }}-${{ steps.get_llvm.outputs.url }}
+          path: .llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}
+          key: llvm-archive-v1-${{ matrix.os_name }}-${{ steps.get_llvm.outputs.url }}
 
-      - name: "[Windows] Fetch LLVM"
-        if: startsWith(matrix.os_name, 'windows') && steps.cache-llvm.outputs.cache-hit != 'true'
+      - name: Download LLVM archive on cache miss
+        if: steps.restore-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          curl -L -o llvm.zip ${{ steps.get_llvm.outputs.url }}
-          unzip -q llvm.zip
-          cp -r llvm-mingw-*/* release_pkg/tools/llvm/
+          echo "LLVM was not present in the default-branch cache; downloading it for this build."
+          mkdir -p ".llvm-cache/${{ matrix.os_name }}"
+          curl --fail --location --retry 3 --output ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}" "${{ steps.get_llvm.outputs.url }}"
+          test -s ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}"
 
-      - name: "[macOS] Fetch LLVM (Force Fix)"
-        if: matrix.os_name == 'macos-arm64'
+      - name: "[Windows] Stage LLVM toolchain"
+        if: startsWith(matrix.os_name, 'windows')
         shell: bash
         run: |
-          if [ ! -f "release_pkg/tools/llvm/bin/llvm-objdump" ]; then
-            echo "Missing llvm-objdump in cache. Forcing re-extraction..."
-            curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
-            mkdir -p llvm_tmp
-            tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
-            
-            mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
-            cp llvm_tmp/bin/clang release_pkg/tools/llvm/bin/
-            cp llvm_tmp/bin/ld.lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
-            cp llvm_tmp/bin/lld release_pkg/tools/llvm/bin/ 2>/dev/null || true
-            cp llvm_tmp/bin/llvm-objdump release_pkg/tools/llvm/bin/ 2>/dev/null || true
-            cp -r llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
-            
-            rm -rf llvm_tmp llvm.tar.xz
-          else
-            echo "Cache is healthy. llvm-objdump found."
+          rm -rf llvm_full
+          mkdir -p llvm_full
+          unzip -q ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}" -d llvm_full
+          LLVM_ROOT=$(find llvm_full -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          if [ -z "$LLVM_ROOT" ] || [ ! -f "$LLVM_ROOT/bin/clang.exe" ]; then
+            echo "::error::The cached LLVM archive does not contain a complete Windows toolchain."
+            exit 1
           fi
+          rm -rf release_pkg/tools/llvm
+          mv "$LLVM_ROOT" release_pkg/tools/llvm
+          rm -rf llvm_full
 
-      - name: "[Linux] Fetch LLVM (Force Fix)"
-        if: matrix.os_name == 'linux-x64'
+      - name: "[Unix] Stage LLVM toolchain"
+        if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
         run: |
-          if [ ! -f "release_pkg/tools/llvm/bin/llvm-objdump" ]; then
-            echo "Missing llvm-objdump in cache. Forcing re-extraction..."
-            curl -L -o llvm.tar.xz ${{ steps.get_llvm.outputs.url }}
-            mkdir -p llvm_tmp
-            tar -xf llvm.tar.xz -C llvm_tmp --strip-components=1
-            
-            mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
-            cp -a llvm_tmp/bin/clang llvm_tmp/bin/clang-[0-9]* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-            cp -a llvm_tmp/bin/ld.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-            cp -a llvm_tmp/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-            cp -a llvm_tmp/bin/llvm-objdump* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-            cp -a llvm_tmp/lib/clang release_pkg/tools/llvm/lib/
-            
-            rm -rf llvm_tmp llvm.tar.xz
-          else
-             echo "Cache is healthy. llvm-objdump found."
+          rm -rf llvm_full
+          mkdir -p llvm_full
+          tar -xf ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}" -C llvm_full --strip-components=1
+          if [ ! -f "llvm_full/bin/clang" ] || [ ! -d "llvm_full/lib/clang" ]; then
+            echo "::error::The cached LLVM archive does not contain a complete Unix toolchain."
+            exit 1
           fi
+          mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
+          cp -a llvm_full/bin/clang llvm_full/bin/clang-[0-9]* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_full/bin/ld.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_full/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_full/bin/llvm-objdump* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_full/lib/clang release_pkg/tools/llvm/lib/
+          rm -rf llvm_full
 
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows')
@@ -161,12 +219,12 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
-          
+
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a valid previous release tag to bootstrap from."
             exit 1
           fi
-          
+
           echo "Bootstrapping from previous release: $PREV_TAG"
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-x64-Portable-*.zip" --dir boot_dl --clobber
           unzip -q boot_dl/*.zip -d boot_env
@@ -283,7 +341,7 @@ jobs:
           }
 
           clean_objdump "$WLC_CURRENT" "../wlc_current.asm"
-          
+
           MATCH=false
           for TRY in 1 2 3; do
             echo "Fixpoint Try #$TRY..."
@@ -315,11 +373,11 @@ jobs:
           echo "================================================"
           RT_CURRENT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime.obj")
           RT_NEXT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime_next.obj")
-          
+
           clean_objdump "$RT_CURRENT" "../rt_current.asm"
           "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
           clean_objdump "$RT_NEXT" "../rt_next.asm"
-          
+
           if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
             echo "C Runtime assembly strictly matches! Deterministic build confirmed."
           else
@@ -329,47 +387,6 @@ jobs:
           fi
           rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
 
-      - name: "[Windows] Trim LLVM (Cleanup)"
-        if: startsWith(matrix.os_name, 'windows')
-        shell: bash
-        run: |
-          LLVM_DIR="release_pkg/tools/llvm"
-          
-          rm -rf $LLVM_DIR/python $LLVM_DIR/busybox $LLVM_DIR/share $LLVM_DIR/include $LLVM_DIR/LICENSE.TXT
-          rm -rf $LLVM_DIR/aarch64-w64-mingw32 $LLVM_DIR/arm64ec-w64-mingw32 $LLVM_DIR/armv7-w64-mingw32 $LLVM_DIR/i686-w64-mingw32
-          rm -rf $LLVM_DIR/x86_64-w64-mingw32/share $LLVM_DIR/x86_64-w64-mingw32/bin
-          rm -rf $LLVM_DIR/lib/libear $LLVM_DIR/lib/libscanbuild
-          
-          CLANG_VER_DIR=$(ls -d $LLVM_DIR/lib/clang/* | head -n 1)
-          rm -rf $CLANG_VER_DIR/lib/linux $CLANG_VER_DIR/include/*_wrappers $CLANG_VER_DIR/bin $CLANG_VER_DIR/share
-          
-          rm -f $LLVM_DIR/bin/libpython*.dll $LLVM_DIR/bin/aarch64-* $LLVM_DIR/bin/armv7-* $LLVM_DIR/bin/arm64ec-* $LLVM_DIR/bin/i686-* $LLVM_DIR/bin/*mingw32uwp*
-          rm -f $LLVM_DIR/bin/lldb* $LLVM_DIR/bin/liblldb* $LLVM_DIR/bin/clang-format* $LLVM_DIR/bin/clang-tidy*
-          rm -f $LLVM_DIR/bin/llvm-objdump* $LLVM_DIR/bin/llvm-pdbutil* $LLVM_DIR/bin/clangd* $LLVM_DIR/bin/clang-scan-deps*
-          rm -f $LLVM_DIR/bin/clang-target-wrapper.exe $LLVM_DIR/bin/git-clang-format* $LLVM_DIR/bin/run-clang-tidy*
-          rm -f $LLVM_DIR/bin/scan-build* $LLVM_DIR/bin/analyze-build* $LLVM_DIR/bin/intercept-build*
-          rm -f $LLVM_DIR/bin/llvm-cov* $LLVM_DIR/bin/llvm-profdata* $LLVM_DIR/bin/llvm-ml* $LLVM_DIR/bin/llvm-symbolizer.exe $LLVM_DIR/bin/llvm-wrapper.exe
-          
-          rm -f $LLVM_DIR/bin/llvm-cxxfilt.exe $LLVM_DIR/bin/llvm-lib.exe $LLVM_DIR/bin/llvm-ranlib.exe $LLVM_DIR/bin/llvm-readelf.exe
-          rm -f $LLVM_DIR/bin/llvm-rc.exe $LLVM_DIR/bin/llvm-cvtres.exe $LLVM_DIR/bin/llvm-dlltool.exe $LLVM_DIR/bin/llvm-readobj.exe
-          rm -f $LLVM_DIR/bin/dlltool.exe $LLVM_DIR/bin/*-ar.exe $LLVM_DIR/bin/ar.exe $LLVM_DIR/bin/*-nm.exe $LLVM_DIR/bin/nm.exe
-          rm -f $LLVM_DIR/bin/*-objcopy.exe $LLVM_DIR/bin/objcopy.exe $LLVM_DIR/bin/*-size.exe $LLVM_DIR/bin/size.exe
-          rm -f $LLVM_DIR/bin/*-strings.exe $LLVM_DIR/bin/strings.exe $LLVM_DIR/bin/*-strip.exe $LLVM_DIR/bin/strip.exe
-          rm -f $LLVM_DIR/bin/*addr2line.exe $LLVM_DIR/bin/objdump* $LLVM_DIR/bin/ranlib.exe $LLVM_DIR/bin/readelf.exe
-          
-          rm -f $LLVM_DIR/bin/{c11,c99,cc,gcc,c++,clang++,g++}.exe $LLVM_DIR/bin/*-c++.exe $LLVM_DIR/bin/*-clang++.exe $LLVM_DIR/bin/*-g++.exe
-          rm -f $LLVM_DIR/bin/*.sh $LLVM_DIR/bin/x86_64-w64-mingw32-gcc.exe $LLVM_DIR/bin/gendef.exe $LLVM_DIR/bin/mingw32-make.exe $LLVM_DIR/bin/widl.exe $LLVM_DIR/bin/ld
-          
-          rm -f $LLVM_DIR/bin/libclang_rt.asan_dynamic-x86_64.dll $LLVM_DIR/bin/{libffi-8.dll,libomp.dll}
-          
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libd3d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libd2d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libx3d*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libxaudio*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libxinput*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libmf*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libwindows.*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libc++*.a
-          
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libntvdm*.a $LLVM_DIR/x86_64-w64-mingw32/lib/*fax*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libie*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libvss*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbluetooth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libwlan*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libiis*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptui*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptxml*.a
-
       - name: "[Unix] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
@@ -378,16 +395,16 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
-          
+
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a valid previous release tag to bootstrap from."
             exit 1
           fi
-          
+
           echo "Bootstrapping from previous release: $PREV_TAG"
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" --dir boot_dl --clobber
           tar -xzf boot_dl/*.tar.gz -C boot_env
-          
+
           cd source_repo
           VERSION_NO_V="${GITHUB_REF_NAME#v}"
           COMMITS=$(git rev-list --reverse ${PREV_TAG}..${{ github.ref_name }})
@@ -484,13 +501,13 @@ jobs:
           OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump"
           WLC_CURRENT="$PWD/../release_pkg/bin/wlc"
           WLC_NEXT="$PWD/../release_pkg/bin/wlc_next"
-          
+
           clean_objdump() {
             "$OBJDUMP_CMD" -d "$1" | awk '!/file format/ && NF' > "$2"
           }
 
           clean_objdump "$WLC_CURRENT" "../wlc_current.asm"
-          
+
           MATCH=false
           for TRY in 1 2 3; do
             echo "Fixpoint Try #$TRY..."
@@ -522,11 +539,11 @@ jobs:
           echo "================================================"
           RT_CURRENT="$PWD/../release_pkg/runtime/wl_runtime.o"
           RT_NEXT="$PWD/../release_pkg/runtime/wl_runtime_next.o"
-          
+
           clean_objdump "$RT_CURRENT" "../rt_current.asm"
           "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
           clean_objdump "$RT_NEXT" "../rt_next.asm"
-          
+
           if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
             echo "C Runtime assembly strictly matches! Deterministic build confirmed."
           else
@@ -536,7 +553,63 @@ jobs:
           fi
           rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
 
-      - name: "[Unix] Trim LLVM (Strip Symbols)"
+      - name: "[Windows] Prepare C FFI host"
+        if: startsWith(matrix.os_name, 'windows')
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          WLC="$PWD/release_pkg/bin/wlc.exe"
+          CLANG="$PWD/release_pkg/tools/llvm/bin/clang.exe"
+          FFI_DIR="$PWD/source_repo/tests/integration/ffi"
+
+          cd "$FFI_DIR"
+          rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_c_host.exe
+          "$WLC" test_lib_export.wl --shared
+          "$CLANG" test_dll_host.c test_lib_export.lib -o test_c_host.exe
+          rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp
+
+      - name: "[Windows] Trim LLVM for release"
+        if: startsWith(matrix.os_name, 'windows')
+        shell: bash
+        run: |
+          LLVM_DIR="release_pkg/tools/llvm"
+
+          rm -rf $LLVM_DIR/python $LLVM_DIR/busybox $LLVM_DIR/share $LLVM_DIR/include $LLVM_DIR/LICENSE.TXT
+          rm -rf $LLVM_DIR/aarch64-w64-mingw32 $LLVM_DIR/arm64ec-w64-mingw32 $LLVM_DIR/armv7-w64-mingw32 $LLVM_DIR/i686-w64-mingw32
+          rm -rf $LLVM_DIR/x86_64-w64-mingw32/share $LLVM_DIR/x86_64-w64-mingw32/bin
+          rm -rf $LLVM_DIR/lib/libear $LLVM_DIR/lib/libscanbuild
+
+          CLANG_VER_DIR=$(ls -d $LLVM_DIR/lib/clang/* | head -n 1)
+          rm -rf $CLANG_VER_DIR/lib/linux $CLANG_VER_DIR/include/*_wrappers $CLANG_VER_DIR/bin $CLANG_VER_DIR/share
+
+          rm -f $LLVM_DIR/bin/libpython*.dll $LLVM_DIR/bin/aarch64-* $LLVM_DIR/bin/armv7-* $LLVM_DIR/bin/arm64ec-* $LLVM_DIR/bin/i686-* $LLVM_DIR/bin/*mingw32uwp*
+          rm -f $LLVM_DIR/bin/lldb* $LLVM_DIR/bin/liblldb* $LLVM_DIR/bin/clang-format* $LLVM_DIR/bin/clang-tidy*
+          rm -f $LLVM_DIR/bin/llvm-objdump* $LLVM_DIR/bin/llvm-pdbutil* $LLVM_DIR/bin/clangd* $LLVM_DIR/bin/clang-scan-deps*
+          rm -f $LLVM_DIR/bin/clang-target-wrapper.exe $LLVM_DIR/bin/git-clang-format* $LLVM_DIR/bin/run-clang-tidy*
+          rm -f $LLVM_DIR/bin/scan-build* $LLVM_DIR/bin/analyze-build* $LLVM_DIR/bin/intercept-build*
+          rm -f $LLVM_DIR/bin/llvm-cov* $LLVM_DIR/bin/llvm-profdata* $LLVM_DIR/bin/llvm-ml* $LLVM_DIR/bin/llvm-symbolizer.exe $LLVM_DIR/bin/llvm-wrapper.exe
+
+          rm -f $LLVM_DIR/bin/llvm-cxxfilt.exe $LLVM_DIR/bin/llvm-lib.exe $LLVM_DIR/bin/llvm-ranlib.exe $LLVM_DIR/bin/llvm-readelf.exe
+          rm -f $LLVM_DIR/bin/llvm-rc.exe $LLVM_DIR/bin/llvm-cvtres.exe $LLVM_DIR/bin/llvm-dlltool.exe $LLVM_DIR/bin/llvm-readobj.exe
+          rm -f $LLVM_DIR/bin/dlltool.exe $LLVM_DIR/bin/*-ar.exe $LLVM_DIR/bin/ar.exe $LLVM_DIR/bin/*-nm.exe $LLVM_DIR/bin/nm.exe
+          rm -f $LLVM_DIR/bin/*-objcopy.exe $LLVM_DIR/bin/objcopy.exe $LLVM_DIR/bin/*-size.exe $LLVM_DIR/bin/size.exe
+          rm -f $LLVM_DIR/bin/*-strings.exe $LLVM_DIR/bin/strings.exe $LLVM_DIR/bin/*-strip.exe $LLVM_DIR/bin/strip.exe
+          rm -f $LLVM_DIR/bin/*addr2line.exe $LLVM_DIR/bin/objdump* $LLVM_DIR/bin/ranlib.exe $LLVM_DIR/bin/readelf.exe
+
+          rm -f $LLVM_DIR/bin/{c11,c99,cc,gcc,c++,clang++,g++}.exe $LLVM_DIR/bin/*-c++.exe $LLVM_DIR/bin/*-clang++.exe $LLVM_DIR/bin/*-g++.exe
+          rm -f $LLVM_DIR/bin/*.sh $LLVM_DIR/bin/x86_64-w64-mingw32-gcc.exe $LLVM_DIR/bin/gendef.exe $LLVM_DIR/bin/mingw32-make.exe $LLVM_DIR/bin/widl.exe $LLVM_DIR/bin/ld
+
+          rm -f $LLVM_DIR/bin/libclang_rt.asan_dynamic-x86_64.dll $LLVM_DIR/bin/{libffi-8.dll,libomp.dll}
+
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libd3d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libd2d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libx3d*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libxaudio*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libxinput*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libmf*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libwindows.*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libc++*.a
+
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libntvdm*.a $LLVM_DIR/x86_64-w64-mingw32/lib/*fax*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libie*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libvss*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbluetooth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libwlan*.a
+          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libiis*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptui*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptxml*.a
+
+      - name: "[Unix] Trim LLVM for release"
         if: startsWith(matrix.os_name, 'windows') == false
         shell: bash
         run: |
@@ -550,57 +623,204 @@ jobs:
             fi
           fi
 
-      - name: Run Automated Test Suite
+      - name: Run language, integration, and end-to-end tests
         shell: bash
         run: |
           export WL_PATH="$PWD/release_pkg"
           if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
             export SDKROOT=$(xcrun --show-sdk-path)
           fi
-          
+
           WLC="$PWD/release_pkg/bin/wlc"
           [ -f "${WLC}.exe" ] && WLC="${WLC}.exe"
-          TESTS=$(find source_repo/tests -type f -name "*.wl" ! -path "*/ffi/*" ! -path "*/failure/*" ! -path "*/failures/*" ! -path "*/fixtures/*")
           ERRORS=0
           FAILED_FILES=()
 
-          for file in $TESTS; do
+          while IFS= read -r -d '' file; do
             echo "Running test: $file"
-            
-            $WLC "$file" -o test_bin
-            if [ $? -ne 0 ]; then
+
+            rm -f test_bin test_bin.exe
+            if ! "$WLC" "$file" -o test_bin; then
               echo "::error file=$file::Compilation Failed"
               FAILED_FILES+=("[Compile Error] $file")
               ERRORS=$((ERRORS+1))
               continue
             fi
-            
+
             if [ -f "test_bin.exe" ]; then
-              OUTPUT=$(./test_bin.exe 2>&1 || true)
+              TEST_BIN="./test_bin.exe"
             else
-              OUTPUT=$(./test_bin 2>&1 || true)
+              TEST_BIN="./test_bin"
             fi
-            
-            if ! echo "$OUTPUT" | grep -q "PASS:"; then
+
+            set +e
+            OUTPUT=$($TEST_BIN 2>&1)
+            STATUS=$?
+            set -e
+            if [ $STATUS -ne 0 ] || ! grep -Fq "PASS:" <<< "$OUTPUT"; then
               echo "::error file=$file::Test Logic Failed"
               echo "Output: $OUTPUT"
               FAILED_FILES+=("[Runtime Error] $file")
               ERRORS=$((ERRORS+1))
             fi
-            
-            rm -f test_bin test_bin test_bin.exe
-          done
-          
+
+            rm -f test_bin test_bin.exe
+          done < <(find source_repo/tests -type f -name "*.wl" ! -path "*/ffi/*" ! -path "*/failures/*" ! -path "*/fixtures/*" -print0)
+
           if [ $ERRORS -ne 0 ]; then
             echo "------------------------------------------"
-            echo "TEST SUMMARY: $ERRORS tests failed!"
+            echo "POSITIVE TEST SUMMARY: $ERRORS tests failed"
             for failed in "${FAILED_FILES[@]}"; do
               echo "  - $failed"
             done
             echo "------------------------------------------"
             exit 1
           fi
-          echo "All tests passed successfully!"
+          echo "All language, integration, and end-to-end tests passed."
+
+      - name: Run diagnostic tests
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
+            export SDKROOT=$(xcrun --show-sdk-path)
+          fi
+
+          WLC="$PWD/release_pkg/bin/wlc"
+          [ -f "${WLC}.exe" ] && WLC="${WLC}.exe"
+          ERRORS=0
+          FAILED_FILES=()
+
+          while IFS= read -r -d '' file; do
+            echo "Running diagnostic: $file"
+            EXPECTED=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$file" | head -n 1)
+            if [ -z "$EXPECTED" ]; then
+              echo "::error file=$file::Missing Expected Error declaration"
+              FAILED_FILES+=("[Missing Metadata] $file")
+              ERRORS=$((ERRORS+1))
+              continue
+            fi
+
+            rm -f diagnostic_bin diagnostic_bin.exe
+            set +e
+            BUILD_OUTPUT=$("$WLC" "$file" -o diagnostic_bin 2>&1)
+            BUILD_STATUS=$?
+            set -e
+            RUN_OUTPUT=""
+            RUN_STATUS=0
+
+            if [ $BUILD_STATUS -eq 0 ]; then
+              if [ -f "diagnostic_bin.exe" ]; then
+                DIAGNOSTIC_BIN="./diagnostic_bin.exe"
+              else
+                DIAGNOSTIC_BIN="./diagnostic_bin"
+              fi
+              set +e
+              RUN_OUTPUT=$($DIAGNOSTIC_BIN 2>&1)
+              RUN_STATUS=$?
+              set -e
+            fi
+
+            OUTPUT="$BUILD_OUTPUT"
+            if [ -n "$RUN_OUTPUT" ]; then
+              OUTPUT="${OUTPUT}"$'\n'"${RUN_OUTPUT}"
+            fi
+
+            if [ $BUILD_STATUS -eq 0 ] && [ $RUN_STATUS -eq 0 ]; then
+              echo "::error file=$file::Test was expected to fail but completed successfully"
+              echo "Expected: $EXPECTED"
+              FAILED_FILES+=("[Unexpected Success] $file")
+              ERRORS=$((ERRORS+1))
+            elif ! grep -Fq "$EXPECTED" <<< "$OUTPUT"; then
+              echo "::error file=$file::Expected diagnostic was not produced"
+              echo "Expected: $EXPECTED"
+              echo "Compiler exit: $BUILD_STATUS; program exit: $RUN_STATUS"
+              echo "Output: $OUTPUT"
+              FAILED_FILES+=("[Diagnostic Mismatch] $file")
+              ERRORS=$((ERRORS+1))
+            fi
+
+            rm -f diagnostic_bin diagnostic_bin.exe
+          done < <(find source_repo/tests/diagnostics/failures -type f -name "*.wl" -print0)
+
+          if [ $ERRORS -ne 0 ]; then
+            echo "------------------------------------------"
+            echo "DIAGNOSTIC TEST SUMMARY: $ERRORS tests failed"
+            for failed in "${FAILED_FILES[@]}"; do
+              echo "  - $failed"
+            done
+            echo "------------------------------------------"
+            exit 1
+          fi
+          echo "All diagnostic tests passed."
+
+      - name: Run FFI tests
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          if [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
+            export SDKROOT=$(xcrun --show-sdk-path)
+          fi
+
+          WLC="$PWD/release_pkg/bin/wlc"
+          [ -f "${WLC}.exe" ] && WLC="${WLC}.exe"
+          CLANG="$PWD/release_pkg/tools/llvm/bin/clang"
+          [ -f "${CLANG}.exe" ] && CLANG="${CLANG}.exe"
+          FFI_DIR="$PWD/source_repo/tests/integration/ffi"
+
+          cd "$FFI_DIR"
+          rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_lib_export.so libtest_lib_export.so libtest_lib_export.dylib
+          rm -f test_wl_host test_wl_host.exe
+          if [ "${{ matrix.os_name }}" != "windows-x64" ]; then
+            rm -f test_c_host test_c_host.exe
+          fi
+
+          "$WLC" test_lib_export.wl --shared
+
+          if [ "${{ matrix.os_name }}" == "windows-x64" ]; then
+            SHARED_LIB="test_lib_export.dll"
+            WL_LINK_LIB="test_lib_export.lib"
+            C_HOST="./test_c_host.exe"
+            WL_HOST="test_wl_host.exe"
+          elif [ "${{ matrix.os_name }}" == "macos-arm64" ]; then
+            SHARED_LIB="libtest_lib_export.dylib"
+            WL_LINK_LIB="$SHARED_LIB"
+            cp "$SHARED_LIB" test_lib_export.so
+            "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,@loader_path -o test_c_host
+            C_HOST="./test_c_host"
+            WL_HOST="test_wl_host"
+            export DYLD_LIBRARY_PATH="$PWD${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          else
+            SHARED_LIB="libtest_lib_export.so"
+            WL_LINK_LIB="$SHARED_LIB"
+            cp "$SHARED_LIB" test_lib_export.so
+            "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
+            C_HOST="./test_c_host"
+            WL_HOST="test_wl_host"
+            export LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+
+          C_OUTPUT=$($C_HOST 2>&1)
+          echo "$C_OUTPUT"
+          grep -Fq "PASS:" <<< "$C_OUTPUT"
+
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON=python3
+          else
+            PYTHON=python
+          fi
+          PYTHON_OUTPUT=$($PYTHON test_dll_host.py 2>&1)
+          echo "$PYTHON_OUTPUT"
+          grep -Fq "PASS:" <<< "$PYTHON_OUTPUT"
+
+          "$WLC" test_dll_host.wl "$WL_LINK_LIB" -o "$WL_HOST"
+          WL_OUTPUT=$(./"$WL_HOST" 2>&1)
+          echo "$WL_OUTPUT"
+          grep -Fq "PASS:" <<< "$WL_OUTPUT"
+
+          rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_lib_export.so libtest_lib_export.so libtest_lib_export.dylib
+          rm -f test_c_host test_c_host.exe test_wl_host test_wl_host.exe
+          echo "All FFI tests passed."
 
       - name: "[Windows] Compile InnoSetup Installer"
         if: startsWith(matrix.os_name, 'windows')
