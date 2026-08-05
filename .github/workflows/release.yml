@@ -564,7 +564,7 @@ jobs:
 
           cd "$FFI_DIR"
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_c_host.exe
-          "$WLC" test_lib_export.wl --shared
+          "$WLC" test_lib_export.wl --shared --ldflags "-Wl,--out-implib,test_lib_export.lib"
           "$CLANG" test_dll_host.c test_lib_export.lib -o test_c_host.exe
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp
 
@@ -590,7 +590,7 @@ jobs:
           rm -f $LLVM_DIR/bin/llvm-cov* $LLVM_DIR/bin/llvm-profdata* $LLVM_DIR/bin/llvm-ml* $LLVM_DIR/bin/llvm-symbolizer.exe $LLVM_DIR/bin/llvm-wrapper.exe
 
           rm -f $LLVM_DIR/bin/llvm-cxxfilt.exe $LLVM_DIR/bin/llvm-lib.exe $LLVM_DIR/bin/llvm-ranlib.exe $LLVM_DIR/bin/llvm-readelf.exe
-          rm -f $LLVM_DIR/bin/llvm-rc.exe $LLVM_DIR/bin/llvm-cvtres.exe $LLVM_DIR/bin/llvm-readobj.exe
+          rm -f $LLVM_DIR/bin/llvm-rc.exe $LLVM_DIR/bin/llvm-cvtres.exe $LLVM_DIR/bin/llvm-dlltool.exe $LLVM_DIR/bin/llvm-readobj.exe
           rm -f $LLVM_DIR/bin/dlltool.exe $LLVM_DIR/bin/*-ar.exe $LLVM_DIR/bin/ar.exe $LLVM_DIR/bin/*-nm.exe $LLVM_DIR/bin/nm.exe
           rm -f $LLVM_DIR/bin/*-objcopy.exe $LLVM_DIR/bin/objcopy.exe $LLVM_DIR/bin/*-size.exe $LLVM_DIR/bin/size.exe
           rm -f $LLVM_DIR/bin/*-strings.exe $LLVM_DIR/bin/strings.exe $LLVM_DIR/bin/*-strip.exe $LLVM_DIR/bin/strip.exe
@@ -775,7 +775,11 @@ jobs:
             rm -f test_c_host test_c_host.exe
           fi
 
-          "$WLC" test_lib_export.wl --shared
+          if [ "${{ matrix.os_name }}" == "windows-x64" ]; then
+            "$WLC" test_lib_export.wl --shared --ldflags "-Wl,--out-implib,test_lib_export.lib"
+          else
+            "$WLC" test_lib_export.wl --shared
+          fi
 
           if [ "${{ matrix.os_name }}" == "windows-x64" ]; then
             SHARED_LIB="test_lib_export.dll"
