@@ -257,13 +257,20 @@ jobs:
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
-            cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"
+            rm -rf "$ACTIVE_ENV/runtime_backup"
+            if [ -d "$ACTIVE_ENV/runtime" ]; then cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"; fi
 
-
-            "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime_new.obj" -O2
+            HAS_NATIVE_RT=false
+            if [ -f runtime/wl_runtime.c ]; then
+              HAS_NATIVE_RT=true
+              mkdir -p "$ACTIVE_ENV/runtime"
+              "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime_new.obj" -O2
+            fi
+            NEW_RT_LABEL="New RT"
+            if [ "$HAS_NATIVE_RT" = false ]; then NEW_RT_LABEL="No RT"; fi
 
             export WL_PATH="$ACTIVE_ENV"
-            mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
+            mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std
             cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
 
             ICON_ARG=""
@@ -275,23 +282,35 @@ jobs:
               rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime/wl_runtime.obj"
               mkdir -p "$ACTIVE_ENV/std"
               if [ "$1" == "new_std" ]; then cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true; else cp -a "$ACTIVE_ENV/std_backup/." "$ACTIVE_ENV/std/"; fi
-              if [ "$2" == "new_rt" ]; then cp "$ACTIVE_ENV/runtime/wl_runtime_new.obj" "$ACTIVE_ENV/runtime/wl_runtime.obj"; else cp "$ACTIVE_ENV/runtime_backup/wl_runtime.obj" "$ACTIVE_ENV/runtime/wl_runtime.obj"; fi
+              if [ "$2" == "new_rt" ]; then
+                if [ "$HAS_NATIVE_RT" = true ]; then
+                  mkdir -p "$ACTIVE_ENV/runtime"
+                  cp "$ACTIVE_ENV/runtime/wl_runtime_new.obj" "$ACTIVE_ENV/runtime/wl_runtime.obj"
+                else
+                  rm -rf "$ACTIVE_ENV/runtime"
+                fi
+              elif [ -f "$ACTIVE_ENV/runtime_backup/wl_runtime.obj" ]; then
+                mkdir -p "$ACTIVE_ENV/runtime"
+                cp "$ACTIVE_ENV/runtime_backup/wl_runtime.obj" "$ACTIVE_ENV/runtime/wl_runtime.obj"
+              else
+                rm -rf "$ACTIVE_ENV/runtime"
+              fi
             }
 
-            echo "Stage 1: Trying [New STD + New RT]..."
+            echo "Stage 1: Trying [New STD + $NEW_RT_LABEL]..."
             apply_env new_std new_rt
             if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
-              echo "[New STD + New RT] succeeded."
+              echo "[New STD + $NEW_RT_LABEL] succeeded."
             else
               echo "Failed. Trying [New STD + Old RT]..."
               apply_env new_std old_rt
               if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
                 echo "[New STD + Old RT] succeeded."
               else
-                echo "Failed. Trying [Old STD + New RT]..."
+                echo "Failed. Trying [Old STD + $NEW_RT_LABEL]..."
                 apply_env old_std new_rt
                 if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
-                  echo "[Old STD + New RT] succeeded."
+                  echo "[Old STD + $NEW_RT_LABEL] succeeded."
                 else
                   echo "Failed. Trying [Old STD + Old RT]..."
                   apply_env old_std old_rt
@@ -304,13 +323,18 @@ jobs:
               fi
             fi
 
-            echo "Stage 2: Finalizing with latest STD & RT..."
+            echo "Stage 2: Finalizing with latest STD and runtime state..."
             apply_env new_std new_rt
             "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -Oz
             rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe "$ACTIVE_ENV/runtime/wl_runtime_new.obj"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
-            cp "$ACTIVE_ENV/runtime/wl_runtime.obj" ../build_${SHORT_SHA}/runtime/wl_runtime.obj
+            if [ "$HAS_NATIVE_RT" = true ]; then
+              mkdir -p ../build_${SHORT_SHA}/runtime
+              cp "$ACTIVE_ENV/runtime/wl_runtime.obj" ../build_${SHORT_SHA}/runtime/wl_runtime.obj
+            else
+              rm -rf ../build_${SHORT_SHA}/runtime
+            fi
             cp -r std/* ../build_${SHORT_SHA}/std/
 
             ACTIVE_WLC=$(cygpath -m "$PWD/../build_${SHORT_SHA}/bin/wlc.exe")
@@ -318,12 +342,21 @@ jobs:
 
             if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
               cp "$ACTIVE_WLC" ../release_pkg/bin/
-              cp ../build_${SHORT_SHA}/runtime/wl_runtime.obj ../release_pkg/runtime/
+              if [ "$HAS_NATIVE_RT" = true ]; then
+                mkdir -p ../release_pkg/runtime
+                cp ../build_${SHORT_SHA}/runtime/wl_runtime.obj ../release_pkg/runtime/
+              else
+                rm -rf ../release_pkg/runtime
+              fi
               cp -r std/* ../release_pkg/std/
             else
               SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
               cd ../build_${SHORT_SHA}
-              7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip bin std runtime > /dev/null
+              if [ -d runtime ]; then
+                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip bin std runtime > /dev/null
+              else
+                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip bin std > /dev/null
+              fi
               cd ../source_repo
             fi
           done
@@ -371,21 +404,26 @@ jobs:
           echo "================================================"
           echo " Starting C Runtime Determinism Check (Assembly)"
           echo "================================================"
-          RT_CURRENT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime.obj")
-          RT_NEXT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime_next.obj")
+          if [ -f runtime/wl_runtime.c ] && [ -f ../release_pkg/runtime/wl_runtime.obj ]; then
+            RT_CURRENT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime.obj")
+            RT_NEXT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime_next.obj")
 
-          clean_objdump "$RT_CURRENT" "../rt_current.asm"
-          "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
-          clean_objdump "$RT_NEXT" "../rt_next.asm"
+            clean_objdump "$RT_CURRENT" "../rt_current.asm"
+            "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
+            clean_objdump "$RT_NEXT" "../rt_next.asm"
 
-          if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
-            echo "C Runtime assembly strictly matches! Deterministic build confirmed."
+            if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
+              echo "C Runtime assembly strictly matches! Deterministic build confirmed."
+            else
+              echo "::error::C Runtime assembly mismatch! Compilation is non-deterministic."
+              head -n 20 ../diff_rt.log
+              exit 1
+            fi
+            rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
           else
-            echo "::error::C Runtime assembly mismatch! Compilation is non-deterministic."
-            head -n 20 ../diff_rt.log
-            exit 1
+            echo "No native C runtime in this release; determinism check skipped."
+            rm -rf ../release_pkg/runtime
           fi
-          rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
 
       - name: "[Unix] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -428,35 +466,55 @@ jobs:
             git checkout $COMMIT
 
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
-            cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"
+            rm -rf "$ACTIVE_ENV/runtime_backup"
+            if [ -d "$ACTIVE_ENV/runtime" ]; then cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"; fi
 
-            "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime_new.o" -O2
+            HAS_NATIVE_RT=false
+            if [ -f runtime/wl_runtime.c ]; then
+              HAS_NATIVE_RT=true
+              mkdir -p "$ACTIVE_ENV/runtime"
+              "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$ACTIVE_ENV/runtime/wl_runtime_new.o" -O2
+            fi
+            NEW_RT_LABEL="New RT"
+            if [ "$HAS_NATIVE_RT" = false ]; then NEW_RT_LABEL="No RT"; fi
 
             export WL_PATH="$ACTIVE_ENV"
-            mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std ../build_${SHORT_SHA}/runtime
+            mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std
             cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
 
             apply_env() {
               rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime/wl_runtime.o"
               mkdir -p "$ACTIVE_ENV/std"
               if [ "$1" == "new_std" ]; then cp -rf std/* "$ACTIVE_ENV/std/" 2>/dev/null || true; else cp -a "$ACTIVE_ENV/std_backup/." "$ACTIVE_ENV/std/"; fi
-              if [ "$2" == "new_rt" ]; then cp "$ACTIVE_ENV/runtime/wl_runtime_new.o" "$ACTIVE_ENV/runtime/wl_runtime.o"; else cp "$ACTIVE_ENV/runtime_backup/wl_runtime.o" "$ACTIVE_ENV/runtime/wl_runtime.o"; fi
+              if [ "$2" == "new_rt" ]; then
+                if [ "$HAS_NATIVE_RT" = true ]; then
+                  mkdir -p "$ACTIVE_ENV/runtime"
+                  cp "$ACTIVE_ENV/runtime/wl_runtime_new.o" "$ACTIVE_ENV/runtime/wl_runtime.o"
+                else
+                  rm -rf "$ACTIVE_ENV/runtime"
+                fi
+              elif [ -f "$ACTIVE_ENV/runtime_backup/wl_runtime.o" ]; then
+                mkdir -p "$ACTIVE_ENV/runtime"
+                cp "$ACTIVE_ENV/runtime_backup/wl_runtime.o" "$ACTIVE_ENV/runtime/wl_runtime.o"
+              else
+                rm -rf "$ACTIVE_ENV/runtime"
+              fi
             }
 
-            echo "Stage 1: Trying [New STD + New RT]..."
+            echo "Stage 1: Trying [New STD + $NEW_RT_LABEL]..."
             apply_env new_std new_rt
             if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
-              echo "[New STD + New RT] succeeded."
+              echo "[New STD + $NEW_RT_LABEL] succeeded."
             else
               echo "Failed. Trying [New STD + Old RT]..."
               apply_env new_std old_rt
               if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
                 echo "[New STD + Old RT] succeeded."
               else
-                echo "Failed. Trying [Old STD + New RT]..."
+                echo "Failed. Trying [Old STD + $NEW_RT_LABEL]..."
                 apply_env old_std new_rt
                 if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
-                  echo "[Old STD + New RT] succeeded."
+                  echo "[Old STD + $NEW_RT_LABEL] succeeded."
                 else
                   echo "Failed. Trying [Old STD + Old RT]..."
                   apply_env old_std old_rt
@@ -469,13 +527,18 @@ jobs:
               fi
             fi
 
-            echo "Stage 2: Finalizing with latest STD & RT..."
+            echo "Stage 2: Finalizing with latest STD and runtime state..."
             apply_env new_std new_rt
             "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -Oz
             rm -f ../build_${SHORT_SHA}/bin/wlc_temp "$ACTIVE_ENV/runtime/wl_runtime_new.o"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
-            cp "$ACTIVE_ENV/runtime/wl_runtime.o" ../build_${SHORT_SHA}/runtime/wl_runtime.o
+            if [ "$HAS_NATIVE_RT" = true ]; then
+              mkdir -p ../build_${SHORT_SHA}/runtime
+              cp "$ACTIVE_ENV/runtime/wl_runtime.o" ../build_${SHORT_SHA}/runtime/wl_runtime.o
+            else
+              rm -rf ../build_${SHORT_SHA}/runtime
+            fi
             cp -r std/* ../build_${SHORT_SHA}/std/
 
             ACTIVE_WLC="$PWD/../build_${SHORT_SHA}/bin/wlc"
@@ -483,12 +546,21 @@ jobs:
 
             if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
               cp "$ACTIVE_WLC" ../release_pkg/bin/
-              cp ../build_${SHORT_SHA}/runtime/wl_runtime.o ../release_pkg/runtime/
+              if [ "$HAS_NATIVE_RT" = true ]; then
+                mkdir -p ../release_pkg/runtime
+                cp ../build_${SHORT_SHA}/runtime/wl_runtime.o ../release_pkg/runtime/
+              else
+                rm -rf ../release_pkg/runtime
+              fi
               cp -r std/* ../release_pkg/std/
             else
               SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
               cd ../build_${SHORT_SHA}
-              tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz bin std runtime
+              if [ -d runtime ]; then
+                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz bin std runtime
+              else
+                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz bin std
+              fi
               cd ../source_repo
             fi
           done
@@ -537,21 +609,26 @@ jobs:
           echo "================================================"
           echo " Starting C Runtime Determinism Check (Assembly)"
           echo "================================================"
-          RT_CURRENT="$PWD/../release_pkg/runtime/wl_runtime.o"
-          RT_NEXT="$PWD/../release_pkg/runtime/wl_runtime_next.o"
+          if [ -f runtime/wl_runtime.c ] && [ -f ../release_pkg/runtime/wl_runtime.o ]; then
+            RT_CURRENT="$PWD/../release_pkg/runtime/wl_runtime.o"
+            RT_NEXT="$PWD/../release_pkg/runtime/wl_runtime_next.o"
 
-          clean_objdump "$RT_CURRENT" "../rt_current.asm"
-          "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
-          clean_objdump "$RT_NEXT" "../rt_next.asm"
+            clean_objdump "$RT_CURRENT" "../rt_current.asm"
+            "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
+            clean_objdump "$RT_NEXT" "../rt_next.asm"
 
-          if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
-            echo "C Runtime assembly strictly matches! Deterministic build confirmed."
+            if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
+              echo "C Runtime assembly strictly matches! Deterministic build confirmed."
+            else
+              echo "::error::C Runtime assembly mismatch! Compilation is non-deterministic."
+              head -n 20 ../diff_rt.log
+              exit 1
+            fi
+            rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
           else
-            echo "::error::C Runtime assembly mismatch! Compilation is non-deterministic."
-            head -n 20 ../diff_rt.log
-            exit 1
+            echo "No native C runtime in this release; determinism check skipped."
+            rm -rf ../release_pkg/runtime
           fi
-          rm -f ../rt_current.asm ../rt_next.asm ../diff_rt.log "$RT_NEXT"
 
       - name: "[Windows] Prepare C FFI host"
         if: startsWith(matrix.os_name, 'windows')

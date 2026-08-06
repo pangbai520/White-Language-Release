@@ -16,7 +16,7 @@ Uninstallable=no
 [Files]
 Source: "release_pkg\bin\*"; DestDir: "{app}\bin"; Flags: recursesubdirs createallsubdirs
 Source: "release_pkg\std\*"; DestDir: "{app}\std"; Flags: recursesubdirs createallsubdirs
-Source: "release_pkg\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs createallsubdirs
+Source: "release_pkg\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 Source: "release_pkg\tools\*"; DestDir: "{app}\tools"; Flags: recursesubdirs createallsubdirs onlyifdoesntexist
 
