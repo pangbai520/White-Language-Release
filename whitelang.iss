@@ -8,7 +8,12 @@ DefaultDirName={localappdata}\Programs\WhiteLanguage
 DefaultGroupName=WhiteLanguage
 Compression=lzma2/ultra64
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+#if AppArch == "x64"
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+#else
+ArchitecturesAllowed=x86compatible
+#endif
 ChangesEnvironment=yes
 PrivilegesRequired=lowest
 Uninstallable=no

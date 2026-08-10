@@ -27,6 +27,12 @@ jobs:
             asset_keyword: ucrt-x86_64.zip
             archive_name: llvm.zip
 
+          - os_name: windows-x32
+            runner: windows-latest
+            llvm_repo: mstorsjo/llvm-mingw
+            asset_keyword: ucrt-i686.zip
+            archive_name: llvm.zip
+
           - os_name: macos-arm64
             runner: macos-14
             llvm_repo: llvm/llvm-project
@@ -37,6 +43,12 @@ jobs:
             runner: ubuntu-latest
             llvm_repo: llvm/llvm-project
             asset_keyword: Linux-X64.tar.xz
+            archive_name: llvm.tar.xz
+
+          - os_name: linux-arm64
+            runner: ubuntu-24.04-arm
+            llvm_repo: llvm/llvm-project
+            asset_keyword: Linux-ARM64.tar.xz
             archive_name: llvm.tar.xz
 
     steps:
@@ -84,6 +96,18 @@ jobs:
             asset_keyword: ucrt-x86_64.zip
             archive_name: llvm.zip
             target_arch: x86_64
+            package_arch: x64
+            windows_target_dir: x86_64-w64-mingw32
+
+          - os_name: windows-x32
+            runner: windows-latest
+            artifact: WhiteLanguage-Windows-x32-Setup.exe
+            llvm_repo: mstorsjo/llvm-mingw
+            asset_keyword: ucrt-i686.zip
+            archive_name: llvm.zip
+            target_arch: i686
+            package_arch: x32
+            windows_target_dir: i686-w64-mingw32
 
           - os_name: macos-arm64
             runner: macos-14
@@ -100,6 +124,21 @@ jobs:
             asset_keyword: Linux-X64.tar.xz
             archive_name: llvm.tar.xz
             target_arch: x86_64
+
+          - os_name: linux-x86
+            runner: ubuntu-latest
+            artifact: whitelang-linux-x86.tar.gz
+            archive_name: llvm.tar.xz
+            target_arch: i686
+            reuse_toolchain: true
+
+          - os_name: linux-arm64
+            runner: ubuntu-24.04-arm
+            artifact: whitelang-linux-arm64.tar.gz
+            llvm_repo: llvm/llvm-project
+            asset_keyword: Linux-ARM64.tar.xz
+            archive_name: llvm.tar.xz
+            target_arch: aarch64
 
     steps:
       - name: Set Version Variable
@@ -147,8 +186,34 @@ jobs:
           mkdir -p Output Output_Snapshots
           mkdir -p release_pkg/std
 
+      - name: "[Linux x86] Restore previous target package"
+        if: matrix.os_name == 'linux-x86'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p boot_env boot_dl
+          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
+          if [ -z "$PREV_TAG" ]; then
+            echo "::error::Could not find a previous release for linux-x86."
+            exit 1
+          fi
+          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-linux-x86-*.tar.gz" --dir boot_dl --clobber
+          tar -xzf boot_dl/*.tar.gz -C boot_env
+          rm -rf release_pkg/tools
+          cp -a boot_env/tools release_pkg/tools
+
+      - name: "[Linux x86] Install 32-bit system libraries"
+        if: matrix.os_name == 'linux-x86'
+        shell: bash
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y libc6:i386 libc6-dev:i386 libstdc++6:i386
+
       - name: Find LLVM release asset
         id: get_llvm
+        if: matrix.reuse_toolchain != true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -162,13 +227,14 @@ jobs:
 
       - name: Restore complete LLVM archive
         id: restore-llvm
+        if: matrix.reuse_toolchain != true
         uses: actions/cache/restore@v4
         with:
           path: .llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}
           key: llvm-archive-v1-${{ matrix.os_name }}-${{ steps.get_llvm.outputs.url }}
 
       - name: Download LLVM archive on cache miss
-        if: steps.restore-llvm.outputs.cache-hit != 'true'
+        if: matrix.reuse_toolchain != true && steps.restore-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
           echo "LLVM was not present in the default-branch cache; downloading it for this build."
@@ -177,7 +243,7 @@ jobs:
           test -s ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}"
 
       - name: "[Windows] Stage LLVM toolchain"
-        if: startsWith(matrix.os_name, 'windows')
+        if: startsWith(matrix.os_name, 'windows') && matrix.reuse_toolchain != true
         shell: bash
         run: |
           rm -rf llvm_full
@@ -193,7 +259,7 @@ jobs:
           rm -rf llvm_full
 
       - name: "[Unix] Stage LLVM toolchain"
-        if: startsWith(matrix.os_name, 'windows') == false
+        if: startsWith(matrix.os_name, 'windows') == false && matrix.reuse_toolchain != true
         shell: bash
         run: |
           rm -rf llvm_full
@@ -226,8 +292,15 @@ jobs:
           fi
 
           echo "Bootstrapping from previous release: $PREV_TAG"
-          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-x64-Portable-*.zip" --dir boot_dl --clobber
+          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-*.zip" --dir boot_dl --clobber
           unzip -q boot_dl/*.zip -d boot_env
+
+          if [ "${{ matrix.os_name }}" == "windows-x32" ]; then
+            for LLVM_HOME in release_pkg/tools/llvm boot_env/tools/llvm; do
+              printf '%s\n' '-fuse-ld=lld' '-L<CFGDIR>/../i686-w64-mingw32/lib' > "$LLVM_HOME/bin/i686-pc-windows-msvc.cfg"
+              cp "$LLVM_HOME/bin/i686-pc-windows-msvc.cfg" "$LLVM_HOME/bin/i686-pc-windows-msvc-clang.cfg"
+            done
+          fi
 
           GLOBAL_LLVM_BIN_ROOT=$(cygpath -m "$PWD/release_pkg/tools/llvm/bin")
           rm -f wlc_icon.res
@@ -440,8 +513,10 @@ jobs:
           fi
 
           echo "Bootstrapping from previous release: $PREV_TAG"
-          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" --dir boot_dl --clobber
-          tar -xzf boot_dl/*.tar.gz -C boot_env
+          if [ ! -f boot_env/bin/wlc ]; then
+            gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" --dir boot_dl --clobber
+            tar -xzf boot_dl/*.tar.gz -C boot_env
+          fi
 
           cd source_repo
           VERSION_NO_V="${GITHUB_REF_NAME#v}"
@@ -571,6 +646,7 @@ jobs:
           echo "================================================"
           export WL_PATH="$PWD/../release_pkg"
           OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump"
+          if [ "${{ matrix.os_name }}" == "linux-x86" ]; then OBJDUMP_CMD="objdump"; fi
           WLC_CURRENT="$PWD/../release_pkg/bin/wlc"
           WLC_NEXT="$PWD/../release_pkg/bin/wlc_next"
 
@@ -645,21 +721,32 @@ jobs:
           "$CLANG" test_dll_host.c test_lib_export.lib -o test_c_host.exe
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp
 
+      - name: "[Windows x32] Install matching Python"
+        if: matrix.os_name == 'windows-x32'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x86
+
       - name: "[Windows] Trim LLVM for release"
         if: startsWith(matrix.os_name, 'windows')
         shell: bash
         run: |
           LLVM_DIR="release_pkg/tools/llvm"
+          TARGET_DIR="${{ matrix.windows_target_dir }}"
 
           rm -rf $LLVM_DIR/python $LLVM_DIR/busybox $LLVM_DIR/share $LLVM_DIR/include $LLVM_DIR/LICENSE.TXT
-          rm -rf $LLVM_DIR/aarch64-w64-mingw32 $LLVM_DIR/arm64ec-w64-mingw32 $LLVM_DIR/armv7-w64-mingw32 $LLVM_DIR/i686-w64-mingw32
-          rm -rf $LLVM_DIR/x86_64-w64-mingw32/share $LLVM_DIR/x86_64-w64-mingw32/bin
+          for TARGET_PATH in $LLVM_DIR/aarch64-w64-mingw32 $LLVM_DIR/arm64ec-w64-mingw32 $LLVM_DIR/armv7-w64-mingw32 $LLVM_DIR/i686-w64-mingw32 $LLVM_DIR/x86_64-w64-mingw32; do
+            if [ "$(basename "$TARGET_PATH")" != "$TARGET_DIR" ]; then rm -rf "$TARGET_PATH"; fi
+          done
+          rm -rf "$LLVM_DIR/$TARGET_DIR/share" "$LLVM_DIR/$TARGET_DIR/bin"
           rm -rf $LLVM_DIR/lib/libear $LLVM_DIR/lib/libscanbuild
 
           CLANG_VER_DIR=$(ls -d $LLVM_DIR/lib/clang/* | head -n 1)
           rm -rf $CLANG_VER_DIR/lib/linux $CLANG_VER_DIR/include/*_wrappers $CLANG_VER_DIR/bin $CLANG_VER_DIR/share
 
-          rm -f $LLVM_DIR/bin/libpython*.dll $LLVM_DIR/bin/aarch64-* $LLVM_DIR/bin/armv7-* $LLVM_DIR/bin/arm64ec-* $LLVM_DIR/bin/i686-* $LLVM_DIR/bin/*mingw32uwp*
+          rm -f $LLVM_DIR/bin/libpython*.dll $LLVM_DIR/bin/aarch64-* $LLVM_DIR/bin/armv7-* $LLVM_DIR/bin/arm64ec-* $LLVM_DIR/bin/*mingw32uwp*
+          if [ "${{ matrix.os_name }}" == "windows-x64" ]; then rm -f $LLVM_DIR/bin/i686-*; else rm -f $LLVM_DIR/bin/x86_64-*; fi
           rm -f $LLVM_DIR/bin/lldb* $LLVM_DIR/bin/liblldb* $LLVM_DIR/bin/clang-format* $LLVM_DIR/bin/clang-tidy*
           rm -f $LLVM_DIR/bin/llvm-objdump* $LLVM_DIR/bin/llvm-pdbutil* $LLVM_DIR/bin/clangd* $LLVM_DIR/bin/clang-scan-deps*
           rm -f $LLVM_DIR/bin/clang-target-wrapper.exe $LLVM_DIR/bin/git-clang-format* $LLVM_DIR/bin/run-clang-tidy*
@@ -674,17 +761,17 @@ jobs:
           rm -f $LLVM_DIR/bin/*addr2line.exe $LLVM_DIR/bin/objdump* $LLVM_DIR/bin/ranlib.exe $LLVM_DIR/bin/readelf.exe
 
           rm -f $LLVM_DIR/bin/{c11,c99,cc,gcc,c++,clang++,g++}.exe $LLVM_DIR/bin/*-c++.exe $LLVM_DIR/bin/*-clang++.exe $LLVM_DIR/bin/*-g++.exe
-          rm -f $LLVM_DIR/bin/*.sh $LLVM_DIR/bin/x86_64-w64-mingw32-gcc.exe $LLVM_DIR/bin/gendef.exe $LLVM_DIR/bin/mingw32-make.exe $LLVM_DIR/bin/widl.exe $LLVM_DIR/bin/ld
+          rm -f $LLVM_DIR/bin/*.sh $LLVM_DIR/bin/*-w64-mingw32-gcc.exe $LLVM_DIR/bin/gendef.exe $LLVM_DIR/bin/mingw32-make.exe $LLVM_DIR/bin/widl.exe $LLVM_DIR/bin/ld
 
-          rm -f $LLVM_DIR/bin/libclang_rt.asan_dynamic-x86_64.dll $LLVM_DIR/bin/{libffi-8.dll,libomp.dll}
+          rm -f $LLVM_DIR/bin/libclang_rt.asan_dynamic-*.dll $LLVM_DIR/bin/{libffi-8.dll,libomp.dll}
 
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libd3d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libd2d*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libx3d*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libxaudio*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libxinput*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libmf*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libwindows.*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libc++*.a
+          rm -f $LLVM_DIR/$TARGET_DIR/lib/libd3d*.a $LLVM_DIR/$TARGET_DIR/lib/libd2d*.a $LLVM_DIR/$TARGET_DIR/lib/libx3d*.a
+          rm -f $LLVM_DIR/$TARGET_DIR/lib/libxaudio*.a $LLVM_DIR/$TARGET_DIR/lib/libxinput*.a $LLVM_DIR/$TARGET_DIR/lib/libmf*.a
+          rm -f $LLVM_DIR/$TARGET_DIR/lib/libwindows.*.a $LLVM_DIR/$TARGET_DIR/lib/libc++*.a
 
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libntvdm*.a $LLVM_DIR/x86_64-w64-mingw32/lib/*fax*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libie*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libvss*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libbluetooth*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libwlan*.a
-          rm -f $LLVM_DIR/x86_64-w64-mingw32/lib/libiis*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptui*.a $LLVM_DIR/x86_64-w64-mingw32/lib/libcryptxml*.a
+          rm -f $LLVM_DIR/$TARGET_DIR/lib/libntvdm*.a $LLVM_DIR/$TARGET_DIR/lib/*fax*.a $LLVM_DIR/$TARGET_DIR/lib/libie*.a
+          rm -f $LLVM_DIR/$TARGET_DIR/lib/libvss*.a $LLVM_DIR/$TARGET_DIR/lib/libbth*.a $LLVM_DIR/$TARGET_DIR/lib/libbluetooth*.a $LLVM_DIR/$TARGET_DIR/lib/libwlan*.a
+          rm -f $LLVM_DIR/$TARGET_DIR/lib/libiis*.a $LLVM_DIR/$TARGET_DIR/lib/libcryptui*.a $LLVM_DIR/$TARGET_DIR/lib/libcryptxml*.a
 
       - name: "[Unix] Trim LLVM for release"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -848,17 +935,17 @@ jobs:
           cd "$FFI_DIR"
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_lib_export.so libtest_lib_export.so libtest_lib_export.dylib
           rm -f test_wl_host test_wl_host.exe
-          if [ "${{ matrix.os_name }}" != "windows-x64" ]; then
+          if [[ "${{ matrix.os_name }}" != windows-* ]]; then
             rm -f test_c_host test_c_host.exe
           fi
 
-          if [ "${{ matrix.os_name }}" == "windows-x64" ]; then
+          if [[ "${{ matrix.os_name }}" == windows-* ]]; then
             "$WLC" test_lib_export.wl --shared --ldflags "-Wl,--out-implib,test_lib_export.lib"
           else
             "$WLC" test_lib_export.wl --shared
           fi
 
-          if [ "${{ matrix.os_name }}" == "windows-x64" ]; then
+          if [[ "${{ matrix.os_name }}" == windows-* ]]; then
             SHARED_LIB="test_lib_export.dll"
             WL_LINK_LIB="test_lib_export.lib"
             C_HOST="./test_c_host.exe"
@@ -889,12 +976,16 @@ jobs:
           echo "$C_OUTPUT"
           grep -Fq "PASS:" <<< "$C_OUTPUT"
 
-          if command -v python3 >/dev/null 2>&1; then
-            PYTHON=python3
+          if [ "${{ matrix.os_name }}" == "linux-x86" ]; then
+            PYTHON_OUTPUT=$(docker run --rm --platform linux/386 -v "$PWD:/ffi" -w /ffi i386/debian:bookworm-slim sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends python3 >/dev/null && LD_LIBRARY_PATH=/ffi python3 test_dll_host.py' 2>&1)
           else
-            PYTHON=python
+            if command -v python3 >/dev/null 2>&1; then
+              PYTHON=python3
+            else
+              PYTHON=python
+            fi
+            PYTHON_OUTPUT=$($PYTHON test_dll_host.py 2>&1)
           fi
-          PYTHON_OUTPUT=$($PYTHON test_dll_host.py 2>&1)
           echo "$PYTHON_OUTPUT"
           grep -Fq "PASS:" <<< "$PYTHON_OUTPUT"
 
@@ -913,8 +1004,8 @@ jobs:
         run: |
           mkdir -Force Output
           $tagVersion = "${{ github.ref_name }}".TrimStart('v')
-          $outName = "WhiteLanguage-Windows-x64-Setup-$tagVersion"
-          iscc /dAppVersion="$tagVersion" /dAppArch="x64" /O"Output" /F"$outName" whitelang.iss
+          $outName = "WhiteLanguage-Windows-${{ matrix.package_arch }}-Setup-$tagVersion"
+          iscc /dAppVersion="$tagVersion" /dAppArch="${{ matrix.package_arch }}" /O"Output" /F"$outName" whitelang.iss
 
       - name: "[Unix] Compress Tarball"
         if: startsWith(matrix.os_name, 'windows') == false
@@ -928,7 +1019,7 @@ jobs:
         shell: pwsh
         run: |
           $tagVersion = "${{ github.ref_name }}".TrimStart('v')
-          $zipName = "WhiteLanguage-Windows-x64-Portable-$tagVersion.zip"
+          $zipName = "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-$tagVersion.zip"
           Compress-Archive -Path "release_pkg\*" -DestinationPath "Output\$zipName" -Force
 
       - name: Prepare Final Versioned Names
@@ -972,9 +1063,284 @@ jobs:
           echo "Workflow failed! Deleting tag ${{ github.ref_name }} from remote..."
           git push --delete origin ${{ github.ref_name }} || true
 
+  build-linux-armv7:
+    name: Build for linux-armv7
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set version variables
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [[ "${{ github.ref }}" != refs/tags/* ]]; then
+            echo "TARGET_REF=main" >> "$GITHUB_ENV"
+          else
+            echo "TARGET_REF=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          fi
+          echo "VERSION_NO_V=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Checkout release repository
+        uses: actions/checkout@v4
+
+      - name: Checkout White Language source
+        uses: actions/checkout@v4
+        with:
+          repository: pangbai520/White-Language
+          path: source_repo
+          ref: ${{ env.TARGET_REF }}
+          fetch-depth: 0
+
+      - name: Enable ARM emulation
+        uses: docker/setup-qemu-action@v3
+
+      - name: Restore previous ARMv7 release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p boot_env boot_dl release_pkg/bin release_pkg/std Output Output_Snapshots
+          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v "snapshot" | head -n 1)
+          if [ -z "$PREV_TAG" ]; then
+            echo "::error::Could not find a previous release for linux-armv7."
+            exit 1
+          fi
+          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-linux-armv7-*.tar.gz" --dir boot_dl --clobber
+          tar -xzf boot_dl/*.tar.gz -C boot_env
+          cp -a boot_env/tools release_pkg/tools
+          echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
+
+      - name: Bootstrap, test, and package ARMv7
+        shell: bash
+        run: |
+          docker run --rm -i --platform linux/arm/v7 \
+            -e PREV_TAG="$PREV_TAG" \
+            -e TARGET_REF="$TARGET_REF" \
+            -e VERSION_NO_V="$VERSION_NO_V" \
+            -v "$PWD:/workspace" \
+            arm32v7/debian:bookworm-slim sh -s <<'ARMV7'
+          set -eu
+          apt-get update
+          apt-get install -y --no-install-recommends binutils ca-certificates git libc6-dev python3
+          rm -rf /var/lib/apt/lists/*
+
+          cd /workspace/source_repo
+          git config --global --add safe.directory /workspace/source_repo
+          commits=$(git rev-list --reverse "$PREV_TAG..$TARGET_REF")
+          final_commit=$(git rev-parse "$TARGET_REF^{commit}")
+          llvm_bin=/workspace/release_pkg/tools/llvm/bin
+          export PATH="$llvm_bin:$PATH"
+          active_wlc=/workspace/boot_env/bin/wlc
+          active_env=/workspace/boot_env
+          chmod +x "$active_wlc" "$llvm_bin/clang" 2>/dev/null || true
+
+          for commit in $commits; do
+            short_sha=$(git rev-parse --short "$commit")
+            echo "------------------------------------------------"
+            echo "Bootstrapping Commit: $short_sha"
+            git checkout "$commit"
+
+            cp -a "$active_env/std" "$active_env/std_backup"
+            rm -rf "$active_env/runtime_backup"
+            if [ -d "$active_env/runtime" ]; then cp -a "$active_env/runtime" "$active_env/runtime_backup"; fi
+
+            has_native_rt=false
+            if [ -f runtime/wl_runtime.c ]; then
+              has_native_rt=true
+              mkdir -p "$active_env/runtime"
+              "$llvm_bin/clang" -c runtime/wl_runtime.c -o "$active_env/runtime/wl_runtime_new.o" -O2
+            fi
+            new_rt_label="New RT"
+            if [ "$has_native_rt" = false ]; then new_rt_label="No RT"; fi
+
+            export WL_PATH="$active_env"
+            build_dir="/workspace/build_$short_sha"
+            mkdir -p "$build_dir/bin" "$build_dir/std"
+            cp -a /workspace/release_pkg/tools "$build_dir/tools"
+
+            apply_env() {
+              rm -rf "$active_env/std" "$active_env/runtime/wl_runtime.o"
+              mkdir -p "$active_env/std"
+              if [ "$1" = new_std ]; then cp -a std/. "$active_env/std/"; else cp -a "$active_env/std_backup/." "$active_env/std/"; fi
+              if [ "$2" = new_rt ]; then
+                if [ "$has_native_rt" = true ]; then
+                  mkdir -p "$active_env/runtime"
+                  cp "$active_env/runtime/wl_runtime_new.o" "$active_env/runtime/wl_runtime.o"
+                else
+                  rm -rf "$active_env/runtime"
+                fi
+              elif [ -f "$active_env/runtime_backup/wl_runtime.o" ]; then
+                mkdir -p "$active_env/runtime"
+                cp "$active_env/runtime_backup/wl_runtime.o" "$active_env/runtime/wl_runtime.o"
+              else
+                rm -rf "$active_env/runtime"
+              fi
+            }
+
+            echo "Stage 1: Trying [New STD + $new_rt_label]..."
+            apply_env new_std new_rt
+            if "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+              echo "[New STD + $new_rt_label] succeeded."
+            else
+              echo "Failed. Trying [New STD + Old RT]..."
+              apply_env new_std old_rt
+              if "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+                echo "[New STD + Old RT] succeeded."
+              else
+                echo "Failed. Trying [Old STD + $new_rt_label]..."
+                apply_env old_std new_rt
+                if "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+                  echo "[Old STD + $new_rt_label] succeeded."
+                else
+                  echo "Failed. Trying [Old STD + Old RT]..."
+                  apply_env old_std old_rt
+                  "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz
+                fi
+              fi
+            fi
+
+            echo "Stage 2: Finalizing with the current standard library..."
+            apply_env new_std new_rt
+            "$build_dir/bin/wlc_temp" src/wlc.wl -o "$build_dir/bin/wlc" -Oz
+            rm -f "$build_dir/bin/wlc_temp" "$active_env/runtime/wl_runtime_new.o"
+            rm -rf "$active_env/std_backup" "$active_env/runtime_backup"
+            if [ "$has_native_rt" = true ]; then
+              mkdir -p "$build_dir/runtime"
+              cp "$active_env/runtime/wl_runtime.o" "$build_dir/runtime/"
+            fi
+            cp -a std/. "$build_dir/std/"
+            active_wlc="$build_dir/bin/wlc"
+            active_env="$build_dir"
+
+            if [ "$commit" = "$final_commit" ]; then
+              cp "$active_wlc" /workspace/release_pkg/bin/wlc
+              rm -rf /workspace/release_pkg/std /workspace/release_pkg/runtime
+              mkdir -p /workspace/release_pkg/std
+              cp -a std/. /workspace/release_pkg/std/
+              if [ "$has_native_rt" = true ]; then cp -a "$build_dir/runtime" /workspace/release_pkg/runtime; fi
+            else
+              snapshot="linux-armv7-$VERSION_NO_V-snapshot-$short_sha"
+              if [ -d "$build_dir/runtime" ]; then
+                tar -czf "/workspace/Output_Snapshots/$snapshot.tar.gz" -C "$build_dir" bin std runtime
+              else
+                tar -czf "/workspace/Output_Snapshots/$snapshot.tar.gz" -C "$build_dir" bin std
+              fi
+            fi
+          done
+          git checkout "$TARGET_REF"
+
+          export WL_PATH=/workspace/release_pkg
+          current=/workspace/release_pkg/bin/wlc
+          next=/workspace/release_pkg/bin/wlc_next
+          clean_objdump() {
+            objdump -d "$1" | awk '!/file format/ && NF' > "$2"
+          }
+          clean_objdump "$current" /workspace/wlc_current.asm
+          matched=false
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            "$current" src/wlc.wl -o "$next" -Oz
+            clean_objdump "$next" /workspace/wlc_next.asm
+            if diff -u /workspace/wlc_current.asm /workspace/wlc_next.asm > /workspace/diff.log; then
+              matched=true
+              mv -f "$next" "$current"
+              break
+            fi
+            head -n 20 /workspace/diff.log
+            mv -f "$next" "$current"
+            mv -f /workspace/wlc_next.asm /workspace/wlc_current.asm
+            attempt=$((attempt + 1))
+          done
+          rm -f /workspace/wlc_current.asm /workspace/wlc_next.asm /workspace/diff.log
+          if [ "$matched" = false ]; then echo "compiler failed to reach a fixed point" >&2; exit 1; fi
+
+          errors=0
+          find /workspace/source_repo/tests -type f -name '*.wl' ! -path '*/ffi/*' ! -path '*/failures/*' ! -path '*/fixtures/*' | sort > /workspace/positive-tests.txt
+          while IFS= read -r test_file; do
+            echo "Running test: $test_file"
+            rm -f /workspace/test_bin
+            if ! "$current" "$test_file" -o /workspace/test_bin; then
+              errors=$((errors + 1))
+              continue
+            fi
+            output=$(/workspace/test_bin 2>&1) || status=$?
+            status=${status:-0}
+            if [ "$status" -ne 0 ] || ! printf '%s\n' "$output" | grep -Fq 'PASS:'; then
+              printf '%s\n' "$output"
+              errors=$((errors + 1))
+            fi
+            unset status
+          done < /workspace/positive-tests.txt
+          if [ "$errors" -ne 0 ]; then echo "$errors positive tests failed" >&2; exit 1; fi
+
+          find /workspace/source_repo/tests/diagnostics/failures -type f -name '*.wl' | sort > /workspace/diagnostic-tests.txt
+          while IFS= read -r test_file; do
+            expected=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$test_file" | head -n 1)
+            if [ -z "$expected" ]; then echo "missing Expected Error declaration: $test_file" >&2; exit 1; fi
+            rm -f /workspace/diagnostic_bin
+            build_output=$("$current" "$test_file" -o /workspace/diagnostic_bin 2>&1) || build_status=$?
+            build_status=${build_status:-0}
+            run_output=""
+            run_status=0
+            if [ "$build_status" -eq 0 ]; then run_output=$(/workspace/diagnostic_bin 2>&1) || run_status=$?; fi
+            if [ "$build_status" -eq 0 ] && [ "$run_status" -eq 0 ]; then echo "diagnostic test unexpectedly passed: $test_file" >&2; exit 1; fi
+            if ! printf '%s\n%s\n' "$build_output" "$run_output" | grep -Fq "$expected"; then
+              printf '%s\n%s\n' "$build_output" "$run_output"
+              echo "expected diagnostic was not produced: $expected" >&2
+              exit 1
+            fi
+            unset build_status
+          done < /workspace/diagnostic-tests.txt
+
+          ffi=/workspace/source_repo/tests/integration/ffi
+          cd "$ffi"
+          rm -f test_lib_export.so libtest_lib_export.so test_c_host test_wl_host
+          "$current" test_lib_export.wl --shared
+          cp libtest_lib_export.so test_lib_export.so
+          "$llvm_bin/clang" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
+          export LD_LIBRARY_PATH="$ffi${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          c_output=$(./test_c_host 2>&1)
+          printf '%s\n' "$c_output" | grep -Fq 'PASS:'
+          python_output=$(python3 test_dll_host.py 2>&1)
+          printf '%s\n' "$python_output" | grep -Fq 'PASS:'
+          "$current" test_dll_host.wl libtest_lib_export.so -o test_wl_host
+          wl_output=$(./test_wl_host 2>&1)
+          printf '%s\n' "$wl_output" | grep -Fq 'PASS:'
+
+          tar -czf "/workspace/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C /workspace/release_pkg .
+          ARMV7
+
+      - name: Upload ARMv7 release asset
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: Output/*
+
+      - name: Upload ARMv7 snapshots
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: ${{ github.ref_name }}-snapshots
+          name: snapshots-${{ github.ref_name }}
+          prerelease: true
+          files: Output_Snapshots/*
+
+      - name: Stash ARMv7 asset for latest promotion
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-linux-armv7
+          path: Output/
+          retention-days: 1
+
+      - name: Cleanup tag on failure
+        if: failure() && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: git push --delete origin "${{ github.ref_name }}" || true
+
   promote-to-r2:
     name: Sync Assets to Cloudflare R2
-    needs: build-and-package
+    needs: [build-and-package, build-linux-armv7]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
