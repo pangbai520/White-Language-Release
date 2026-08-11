@@ -324,7 +324,7 @@ jobs:
           GLOBAL_LLVM_BIN_ROOT=$(cygpath -m "$PWD/release_pkg/tools/llvm/bin")
           rm -f wlc_icon.res
           if [ -f "wlc.rc" ]; then
-            "$GLOBAL_LLVM_BIN_ROOT/windres.exe" wlc.rc -O coff -o wlc_icon.res || true
+            "$GLOBAL_LLVM_BIN_ROOT/windres.exe" wlc.rc -O coff -o wlc_icon.res
           fi
 
           ICON_PATH_ABS=""

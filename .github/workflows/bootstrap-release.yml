@@ -238,8 +238,10 @@ jobs:
         run: |
           export WL_PATH=$(cygpath -m "$PWD/seed_env")
           mkdir -p seed
-          ./raw/wlc.exe source_repo/src/wlc.wl --target x86_64-apple-darwin -S --emit-llvm -o seed/wlc-macos-x64.ll
-          if [ ! -s seed/wlc-macos-x64.ll ]; then echo "::error::The macOS x64 seed IR was not generated."; exit 1; fi
+          rm -f source_repo/src/wlc.ll seed/wlc-macos-x64.ll
+          ./raw/wlc.exe source_repo/src/wlc.wl --target x86_64-apple-darwin -S --emit-llvm
+          if [ ! -s source_repo/src/wlc.ll ]; then echo "::error::The macOS x64 seed IR was not generated."; exit 1; fi
+          mv source_repo/src/wlc.ll seed/wlc-macos-x64.ll
 
       - name: Upload macOS x64 seed IR
         uses: actions/upload-artifact@v4
@@ -325,17 +327,24 @@ jobs:
           cp -L "$LLVM_PREFIX/bin/clang" release_pkg/tools/llvm/bin/clang
           cp -L "$LLVM_PREFIX/bin/llvm-objdump" release_pkg/tools/llvm/bin/llvm-objdump
           cp -a "$LLVM_PREFIX/lib/clang" release_pkg/tools/llvm/lib/
-          find "$LLVM_PREFIX/lib" -maxdepth 1 \( -type f -o -type l \) -name '*.dylib' -exec cp -L {} release_pkg/tools/llvm/lib/ \;
           cp -a source_repo/std/. release_pkg/std/
+
+          copy_dep() {
+            DEP=$1
+            case "$DEP" in
+              /usr/local/*|/opt/homebrew/*) SOURCE=$DEP ;;
+              @rpath/*) SOURCE="$LLVM_PREFIX/lib/$(basename "$DEP")" ;;
+              *) return ;;
+            esac
+            if [ -f "$SOURCE" ]; then
+              NAME=$(basename "$DEP")
+              if [ ! -f "release_pkg/tools/llvm/lib/$NAME" ]; then cp -L "$SOURCE" "release_pkg/tools/llvm/lib/$NAME"; fi
+            fi
+          }
 
           collect_deps() {
             otool -L "$1" | tail -n +2 | awk '{print $1}' | while IFS= read -r DEP; do
-              case "$DEP" in
-                /usr/local/*|/opt/homebrew/*)
-                  NAME=$(basename "$DEP")
-                  if [ ! -f "release_pkg/tools/llvm/lib/$NAME" ]; then cp -L "$DEP" "release_pkg/tools/llvm/lib/$NAME"; fi
-                  ;;
-              esac
+              copy_dep "$DEP"
             done
           }
 
@@ -393,7 +402,7 @@ jobs:
           if ! cmp -s generations/stage2.ll generations/stage3.ll; then echo "::error::${{ matrix.os_name }} bootstrap did not reach an IR fixed point."; exit 1; fi
           cp generations/wlc-stage3 release_pkg/bin/wlc
           chmod +x release_pkg/bin/wlc
-          rm -f release_pkg/tools/llvm/bin/llvm-objdump*
+          if [ "${{ matrix.os_name }}" != "macos-x64" ]; then rm -f release_pkg/tools/llvm/bin/llvm-objdump*; fi
 
       - name: Run ${{ matrix.os_name }} tests
         shell: bash
