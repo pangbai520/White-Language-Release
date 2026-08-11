@@ -5,6 +5,15 @@ on:
     types:
       - published
   workflow_dispatch:
+    inputs:
+      target:
+        description: Bootstrap target
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - linux-x86
 
 permissions:
   contents: write
@@ -37,6 +46,7 @@ jobs:
   windows-x32:
     name: Bootstrap Windows x32
     needs: prepare
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
     runs-on: windows-latest
     steps:
       - name: Checkout release repository
@@ -198,6 +208,7 @@ jobs:
   macos-x64-seed:
     name: Generate macOS x64 seed IR
     needs: prepare
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all'
     runs-on: windows-latest
     steps:
       - name: Checkout White Language v0.3.2
@@ -495,9 +506,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release repository
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == matrix.os_name
         uses: actions/checkout@v4
 
       - name: Checkout White Language v0.3.2
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == matrix.os_name
         uses: actions/checkout@v4
         with:
           repository: pangbai520/White-Language
@@ -506,10 +519,11 @@ jobs:
           fetch-depth: 0
 
       - name: Enable ARM emulation
-        if: matrix.qemu
+        if: matrix.qemu && (github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == matrix.os_name)
         uses: docker/setup-qemu-action@v3
 
       - name: Download raw compiler
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == matrix.os_name
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -521,6 +535,7 @@ jobs:
           mv "$(find raw -maxdepth 1 -type f)" raw/wlc
 
       - name: Bootstrap, test, and package ${{ matrix.os_name }}
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == matrix.os_name
         shell: bash
         run: |
           docker run --rm -i --platform "${{ matrix.platform }}" \
@@ -560,8 +575,11 @@ jobs:
             cp -L "$dep" "$package/tools/llvm/lib/$name"
           done < "$deps"
           rm -f "$deps"
+          strip --strip-unneeded "$package/tools/llvm/bin/clang" "$package/tools/llvm/bin/ld.lld"
           patchelf --set-rpath '$ORIGIN/../lib' "$package/tools/llvm/bin/clang" "$package/tools/llvm/bin/ld.lld"
           find "$package/tools/llvm/lib" -maxdepth 1 -type f -exec patchelf --set-rpath '$ORIGIN' {} \; 2>/dev/null || true
+          "$package/tools/llvm/bin/clang" --version >/dev/null
+          "$package/tools/llvm/bin/ld.lld" --version >/dev/null
 
           export WL_PATH="$package"
           export PATH="$package/tools/llvm/bin:$PATH"
@@ -622,6 +640,7 @@ jobs:
           TARGET
 
       - name: Upload ${{ matrix.os_name }} package
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == matrix.os_name
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

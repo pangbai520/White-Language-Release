@@ -823,11 +823,11 @@ jobs:
             rm -f $LLVM_BIN/llvm-objdump*
             if [[ "$OSTYPE" == "darwin"* ]]; then
               strip -x $LLVM_BIN/* 2>/dev/null || true
-            elif [ "${{ matrix.os_name }}" == "linux-x86" ]; then
-              docker run --rm --platform linux/386 -v "$PWD:/workspace" -w /workspace i386/debian:bookworm-slim sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends binutils >/dev/null && strip --strip-unneeded release_pkg/tools/llvm/bin/*'
-            else
+            elif [ "${{ matrix.os_name }}" != "linux-x86" ]; then
               strip --strip-unneeded $LLVM_BIN/* 2>/dev/null || true
             fi
+            $LLVM_BIN/clang --version >/dev/null
+            $LLVM_BIN/ld.lld --version >/dev/null
           fi
 
       - name: Run language, integration, and end-to-end tests
