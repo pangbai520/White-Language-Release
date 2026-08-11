@@ -1,0 +1,237 @@
+name: White Language Intel macOS Bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RAW_TAG: temp
+  SOURCE_REF: v0.3.2
+  BOOTSTRAP_TAG: bootstrap-v0.3.2
+  PACKAGE_VERSION: 0.3.2-bootstrap
+
+jobs:
+  seed:
+    name: Generate Intel macOS seed IR
+    runs-on: windows-latest
+    steps:
+      - name: Checkout White Language v0.3.2
+        uses: actions/checkout@v4
+        with:
+          repository: pangbai520/White-Language
+          path: source_repo
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 0
+
+      - name: Download Windows x32 compiler
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p raw seed seed_env/std
+          gh release download "$RAW_TAG" --repo "${{ github.repository }}" --pattern "WhiteLanguage-Windows-x32-*.exe" --dir raw --clobber
+          RAW_COUNT=$(find raw -maxdepth 1 -type f -name '*.exe' | wc -l)
+          if [ "$RAW_COUNT" -ne 1 ]; then echo "::error::Expected one Windows x32 compiler in the temp release, found $RAW_COUNT."; exit 1; fi
+          mv "$(find raw -maxdepth 1 -type f -name '*.exe')" raw/wlc.exe
+          cp -a source_repo/std/. seed_env/std/
+
+      - name: Emit Intel macOS compiler IR
+        shell: bash
+        run: |
+          export WL_PATH=$(cygpath -m "$PWD/seed_env")
+          rm -f source_repo/src/wlc.ll seed/wlc-macos-x64.ll
+          ./raw/wlc.exe source_repo/src/wlc.wl --target x86_64-apple-darwin -S --emit-llvm
+          if [ ! -s source_repo/src/wlc.ll ]; then echo "::error::The Intel macOS seed IR was not generated."; exit 1; fi
+          mv source_repo/src/wlc.ll seed/wlc-macos-x64.ll
+
+      - name: Upload Intel macOS seed IR
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64-seed
+          path: seed/wlc-macos-x64.ll
+          retention-days: 1
+
+  bootstrap:
+    name: Bootstrap Intel macOS
+    needs: seed
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout White Language v0.3.2
+        uses: actions/checkout@v4
+        with:
+          repository: pangbai520/White-Language
+          path: source_repo
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 0
+
+      - name: Download seed IR
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-x64-seed
+          path: raw
+
+      - name: Bundle Intel macOS LLVM
+        shell: bash
+        run: |
+          LLVM_PREFIX=$(brew --prefix llvm 2>/dev/null || true)
+          if [ -z "$LLVM_PREFIX" ] || [ ! -x "$LLVM_PREFIX/bin/clang" ]; then brew install llvm; LLVM_PREFIX=$(brew --prefix llvm); fi
+          mkdir -p release_pkg/bin release_pkg/std release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
+          cp -L "$LLVM_PREFIX/bin/clang" release_pkg/tools/llvm/bin/clang
+          cp -L "$LLVM_PREFIX/bin/llvm-objdump" release_pkg/tools/llvm/bin/llvm-objdump
+          cp -a "$LLVM_PREFIX/lib/clang" release_pkg/tools/llvm/lib/
+          cp -a source_repo/std/. release_pkg/std/
+
+          copy_dep() {
+            DEP=$1
+            case "$DEP" in
+              /usr/local/*|/opt/homebrew/*) SOURCE=$DEP ;;
+              @rpath/*) SOURCE="$LLVM_PREFIX/lib/$(basename "$DEP")" ;;
+              *) return ;;
+            esac
+            if [ -f "$SOURCE" ]; then
+              NAME=$(basename "$DEP")
+              if [ ! -f "release_pkg/tools/llvm/lib/$NAME" ]; then cp -L "$SOURCE" "release_pkg/tools/llvm/lib/$NAME"; fi
+            fi
+          }
+
+          collect_deps() {
+            otool -L "$1" | tail -n +2 | awk '{print $1}' | while IFS= read -r DEP; do copy_dep "$DEP"; done
+          }
+
+          collect_deps release_pkg/tools/llvm/bin/clang
+          collect_deps release_pkg/tools/llvm/bin/llvm-objdump
+          PREVIOUS=-1
+          CURRENT=$(find release_pkg/tools/llvm/lib -maxdepth 1 -type f -name '*.dylib' | wc -l)
+          while [ "$CURRENT" -ne "$PREVIOUS" ]; do
+            PREVIOUS=$CURRENT
+            while IFS= read -r LIB; do collect_deps "$LIB"; done < <(find release_pkg/tools/llvm/lib -maxdepth 1 -type f -name '*.dylib')
+            CURRENT=$(find release_pkg/tools/llvm/lib -maxdepth 1 -type f -name '*.dylib' | wc -l)
+          done
+
+          rewrite_deps() {
+            FILE=$1
+            otool -L "$FILE" | tail -n +2 | awk '{print $1}' | while IFS= read -r DEP; do
+              case "$DEP" in
+                /usr/local/*|/opt/homebrew/*) install_name_tool -change "$DEP" "@rpath/$(basename "$DEP")" "$FILE" ;;
+              esac
+            done
+          }
+
+          for BIN in release_pkg/tools/llvm/bin/clang release_pkg/tools/llvm/bin/llvm-objdump; do
+            rewrite_deps "$BIN"
+            install_name_tool -add_rpath '@loader_path/../lib' "$BIN" 2>/dev/null || true
+          done
+          while IFS= read -r LIB; do
+            rewrite_deps "$LIB"
+            install_name_tool -id "@rpath/$(basename "$LIB")" "$LIB"
+            install_name_tool -add_rpath '@loader_path' "$LIB" 2>/dev/null || true
+          done < <(find release_pkg/tools/llvm/lib -maxdepth 1 -type f -name '*.dylib')
+
+          export SDKROOT=$(xcrun --show-sdk-path)
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          release_pkg/tools/llvm/bin/clang -O2 raw/wlc-macos-x64.ll -o raw/wlc
+          chmod +x raw/wlc
+          printf 'int main(void) { return 0; }\n' > llvm-smoke.c
+          release_pkg/tools/llvm/bin/clang llvm-smoke.c -o llvm-smoke
+          ./llvm-smoke
+
+      - name: Bootstrap three generations
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          export PATH="$PWD/release_pkg/tools/llvm/bin:$PATH"
+          export SDKROOT=$(xcrun --show-sdk-path)
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          mkdir -p generations
+          ./raw/wlc source_repo/src/wlc.wl -Oz --keep-temps -o generations/wlc-stage1
+          cp source_repo/src/wlc.ll generations/stage1.ll
+          ./generations/wlc-stage1 source_repo/src/wlc.wl -Oz --keep-temps -o generations/wlc-stage2
+          cp source_repo/src/wlc.ll generations/stage2.ll
+          ./generations/wlc-stage2 source_repo/src/wlc.wl -Oz --keep-temps -o generations/wlc-stage3
+          cp source_repo/src/wlc.ll generations/stage3.ll
+          rm -f source_repo/src/wlc.ll
+          if ! cmp -s generations/stage2.ll generations/stage3.ll; then echo "::error::Intel macOS bootstrap did not reach an IR fixed point."; exit 1; fi
+          cp generations/wlc-stage3 release_pkg/bin/wlc
+          chmod +x release_pkg/bin/wlc
+
+      - name: Run language tests
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          export SDKROOT=$(xcrun --show-sdk-path)
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          WLC="$PWD/release_pkg/bin/wlc"
+          ERRORS=0
+          while IFS= read -r -d '' FILE; do
+            rm -f test_bin
+            if ! "$WLC" "$FILE" -o test_bin; then ERRORS=$((ERRORS + 1)); continue; fi
+            set +e
+            OUTPUT=$(./test_bin 2>&1)
+            STATUS=$?
+            set -e
+            if [ "$STATUS" -ne 0 ] || ! grep -Fq 'PASS:' <<< "$OUTPUT"; then echo "$OUTPUT"; ERRORS=$((ERRORS + 1)); fi
+          done < <(find source_repo/tests -type f -name '*.wl' ! -path '*/ffi/*' ! -path '*/failures/*' ! -path '*/fixtures/*' -print0)
+          if [ "$ERRORS" -ne 0 ]; then echo "::error::$ERRORS Intel macOS tests failed."; exit 1; fi
+
+      - name: Run diagnostics
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          export SDKROOT=$(xcrun --show-sdk-path)
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          WLC="$PWD/release_pkg/bin/wlc"
+          while IFS= read -r -d '' FILE; do
+            EXPECTED=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$FILE" | head -n 1)
+            if [ -z "$EXPECTED" ]; then echo "::error file=$FILE::Missing Expected Error declaration"; exit 1; fi
+            set +e
+            OUTPUT=$("$WLC" "$FILE" -o diagnostic_bin 2>&1)
+            STATUS=$?
+            if [ "$STATUS" -eq 0 ]; then OUTPUT="$OUTPUT"$'\n'"$(./diagnostic_bin 2>&1)"; STATUS=$?; fi
+            set -e
+            if [ "$STATUS" -eq 0 ] || ! grep -Fq "$EXPECTED" <<< "$OUTPUT"; then echo "$OUTPUT"; echo "::error file=$FILE::Diagnostic mismatch"; exit 1; fi
+          done < <(find source_repo/tests/diagnostics/failures -type f -name '*.wl' -print0)
+
+      - name: Run FFI tests
+        shell: bash
+        run: |
+          export WL_PATH="$PWD/release_pkg"
+          export SDKROOT=$(xcrun --show-sdk-path)
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          WLC="$PWD/release_pkg/bin/wlc"
+          CLANG="$PWD/release_pkg/tools/llvm/bin/clang"
+          cd source_repo/tests/integration/ffi
+          rm -f test_lib_export.so libtest_lib_export.dylib test_c_host test_wl_host
+          "$WLC" test_lib_export.wl --shared
+          cp libtest_lib_export.dylib test_lib_export.so
+          "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,@loader_path -o test_c_host
+          export DYLD_LIBRARY_PATH="$PWD${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          grep -Fq 'PASS:' <<< "$(./test_c_host 2>&1)"
+          if command -v python3 >/dev/null 2>&1; then PYTHON=python3; else PYTHON=python; fi
+          grep -Fq 'PASS:' <<< "$($PYTHON test_dll_host.py 2>&1)"
+          "$WLC" test_dll_host.wl libtest_lib_export.dylib -o test_wl_host
+          grep -Fq 'PASS:' <<< "$(./test_wl_host 2>&1)"
+
+      - name: Package and upload Intel macOS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p Output
+          tar -czf "Output/whitelang-macos-x64-$PACKAGE_VERSION.tar.gz" -C release_pkg .
+          gh release upload "$BOOTSTRAP_TAG" Output/* --repo "${{ github.repository }}" --clobber
+
+  verify:
+    name: Verify Intel macOS package
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET="whitelang-macos-x64-$PACKAGE_VERSION.tar.gz"
+          gh release view "$BOOTSTRAP_TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' | grep -Fxq "$ASSET"
+          echo "Intel macOS bootstrap package is ready."
