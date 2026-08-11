@@ -222,7 +222,7 @@ jobs:
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y libc6:i386 libc6-dev:i386 libstdc++6:i386
+          sudo apt-get install -y gcc-multilib libc6:i386 libc6-dev:i386 libstdc++6:i386
 
       - name: Find LLVM release asset
         id: get_llvm
@@ -758,7 +758,7 @@ jobs:
 
           cd "$FFI_DIR"
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_c_host.exe
-          "$WLC" test_lib_export.wl --shared --ldflags "-Wl,--out-implib,test_lib_export.lib"
+          "$WLC" test_lib_export.wl --shared
           "$CLANG" test_dll_host.c test_lib_export.lib -o test_c_host.exe
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp
 
@@ -984,7 +984,7 @@ jobs:
           fi
 
           if [[ "${{ matrix.os_name }}" == windows-* ]]; then
-            "$WLC" test_lib_export.wl --shared --ldflags "-Wl,--out-implib,test_lib_export.lib"
+            "$WLC" test_lib_export.wl --shared
           else
             "$WLC" test_lib_export.wl --shared
           fi
@@ -1171,7 +1171,7 @@ jobs:
             arm32v7/debian:bookworm-slim sh -s <<'ARMV7'
           set -eu
           apt-get update
-          apt-get install -y --no-install-recommends binutils ca-certificates git libc6-dev python3
+          apt-get install -y --no-install-recommends binutils ca-certificates gcc git libc6-dev python3
           rm -rf /var/lib/apt/lists/*
 
           cd /workspace/source_repo
