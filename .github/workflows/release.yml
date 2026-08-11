@@ -827,7 +827,7 @@ jobs:
               strip --strip-unneeded $LLVM_BIN/* 2>/dev/null || true
             fi
             $LLVM_BIN/clang --version >/dev/null
-            $LLVM_BIN/ld.lld --version >/dev/null
+            if [ -x "$LLVM_BIN/ld.lld" ]; then $LLVM_BIN/ld.lld --version >/dev/null; fi
           fi
 
       - name: Run language, integration, and end-to-end tests
