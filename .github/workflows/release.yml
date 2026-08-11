@@ -165,7 +165,7 @@ jobs:
       - name: Checkout White Language Source
         uses: actions/checkout@v4
         with:
-          repository: 'pangbai520/White-Language'
+          repository: 'whitelanguage/white'
           path: 'source_repo'
           ref: ${{ env.TARGET_REF }}
           fetch-depth: 0
@@ -1105,7 +1105,7 @@ jobs:
       - name: Checkout White Language source
         uses: actions/checkout@v4
         with:
-          repository: pangbai520/White-Language
+          repository: whitelanguage/white
           path: source_repo
           ref: ${{ env.TARGET_REF }}
           fetch-depth: 0
