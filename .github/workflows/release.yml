@@ -108,7 +108,6 @@ jobs:
             target_arch: i686
             package_arch: x32
             windows_target_dir: i686-w64-mingw32
-            bootstrap_seed: true
 
           - os_name: macos-arm64
             runner: macos-14
@@ -124,7 +123,6 @@ jobs:
             archive_name: llvm.tar.xz
             target_arch: x86_64
             reuse_toolchain: true
-            bootstrap_seed: true
 
           - os_name: linux-x64
             runner: ubuntu-latest
@@ -140,7 +138,6 @@ jobs:
             archive_name: llvm.tar.xz
             target_arch: i686
             reuse_toolchain: true
-            bootstrap_seed: true
 
           - os_name: linux-arm64
             runner: ubuntu-24.04-arm
@@ -149,7 +146,6 @@ jobs:
             asset_keyword: Linux-ARM64.tar.xz
             archive_name: llvm.tar.xz
             target_arch: aarch64
-            bootstrap_seed: true
 
     steps:
       - name: Set Version Variable
@@ -205,7 +201,6 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          if [ "${{ matrix.bootstrap_seed }}" != true ]; then RELEASE_TAGS=$(printf '%s\n' "$RELEASE_TAGS" | grep -v '^bootstrap-'); fi
           PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${{ github.ref_name }}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a previous release for ${{ matrix.os_name }}."
@@ -298,7 +293,6 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          if [ "${{ matrix.bootstrap_seed }}" != true ]; then RELEASE_TAGS=$(printf '%s\n' "$RELEASE_TAGS" | grep -v '^bootstrap-'); fi
           PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${{ github.ref_name }}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
 
           if [ -z "$PREV_TAG" ]; then
@@ -307,8 +301,6 @@ jobs:
           fi
 
           SOURCE_BASE_TAG="$PREV_TAG"
-          IS_BOOTSTRAP_PACKAGE=false
-          if [[ "$PREV_TAG" == bootstrap-* ]]; then SOURCE_BASE_TAG="${{ github.ref_name }}"; IS_BOOTSTRAP_PACKAGE=true; fi
 
           echo "Bootstrapping from previous release: $PREV_TAG"
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-*.zip" --dir boot_dl --clobber
@@ -342,13 +334,6 @@ jobs:
 
           ACTIVE_WLC=$(cygpath -m "$(find "$PWD/../boot_env" -name wlc.exe | head -n 1)")
           ACTIVE_ENV=$(cygpath -m "$(dirname $(dirname "$ACTIVE_WLC"))")
-
-          if [ "$IS_BOOTSTRAP_PACKAGE" = true ]; then
-            cp "$ACTIVE_WLC" ../release_pkg/bin/wlc.exe
-            rm -rf ../release_pkg/std ../release_pkg/runtime
-            mkdir -p ../release_pkg/std
-            cp -a std/. ../release_pkg/std/
-          fi
 
           for COMMIT in $COMMITS; do
             SHORT_SHA=$(git rev-parse --short $COMMIT)
@@ -532,7 +517,6 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          if [ "${{ matrix.bootstrap_seed }}" != true ]; then RELEASE_TAGS=$(printf '%s\n' "$RELEASE_TAGS" | grep -v '^bootstrap-'); fi
           PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${{ github.ref_name }}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
 
           if [ -z "$PREV_TAG" ]; then
@@ -541,8 +525,6 @@ jobs:
           fi
 
           SOURCE_BASE_TAG="$PREV_TAG"
-          IS_BOOTSTRAP_PACKAGE=false
-          if [[ "$PREV_TAG" == bootstrap-* ]]; then SOURCE_BASE_TAG="${{ github.ref_name }}"; IS_BOOTSTRAP_PACKAGE=true; fi
 
           echo "Bootstrapping from previous release: $PREV_TAG"
           if [ ! -f boot_env/bin/wlc ]; then
@@ -561,14 +543,6 @@ jobs:
           ACTIVE_WLC="$PWD/../boot_env/bin/wlc"
           ACTIVE_ENV="$PWD/../boot_env"
           chmod +x "$ACTIVE_WLC"
-
-          if [ "$IS_BOOTSTRAP_PACKAGE" = true ]; then
-            cp "$ACTIVE_WLC" ../release_pkg/bin/wlc
-            chmod +x ../release_pkg/bin/wlc
-            rm -rf ../release_pkg/std ../release_pkg/runtime
-            mkdir -p ../release_pkg/std
-            cp -a std/. ../release_pkg/std/
-          fi
 
           if [[ "${{ matrix.os_name }}" == macos-* ]]; then
             export SDKROOT=$(xcrun --show-sdk-path)
@@ -1151,14 +1125,11 @@ jobs:
             exit 1
           fi
           SOURCE_BASE_TAG="$PREV_TAG"
-          IS_BOOTSTRAP_PACKAGE=false
-          if [[ "$PREV_TAG" == bootstrap-* ]]; then SOURCE_BASE_TAG="$TARGET_REF"; IS_BOOTSTRAP_PACKAGE=true; fi
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-linux-armv7-*.tar.gz" --dir boot_dl --clobber
           tar -xzf boot_dl/*.tar.gz -C boot_env
           cp -a boot_env/tools release_pkg/tools
           echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
           echo "SOURCE_BASE_TAG=$SOURCE_BASE_TAG" >> "$GITHUB_ENV"
-          echo "IS_BOOTSTRAP_PACKAGE=$IS_BOOTSTRAP_PACKAGE" >> "$GITHUB_ENV"
 
       - name: Bootstrap, test, and package ARMv7
         shell: bash
@@ -1166,7 +1137,6 @@ jobs:
           docker run --rm -i --platform linux/arm/v7 \
             -e PREV_TAG="$PREV_TAG" \
             -e SOURCE_BASE_TAG="$SOURCE_BASE_TAG" \
-            -e IS_BOOTSTRAP_PACKAGE="$IS_BOOTSTRAP_PACKAGE" \
             -e TARGET_REF="$TARGET_REF" \
             -e VERSION_NO_V="$VERSION_NO_V" \
             -v "$PWD:/workspace" \
@@ -1185,14 +1155,6 @@ jobs:
           active_wlc=/workspace/boot_env/bin/wlc
           active_env=/workspace/boot_env
           chmod +x "$active_wlc" "$llvm_bin/clang" 2>/dev/null || true
-
-          if [ "$IS_BOOTSTRAP_PACKAGE" = true ]; then
-            cp "$active_wlc" /workspace/release_pkg/bin/wlc
-            chmod +x /workspace/release_pkg/bin/wlc
-            rm -rf /workspace/release_pkg/std /workspace/release_pkg/runtime
-            mkdir -p /workspace/release_pkg/std
-            cp -a std/. /workspace/release_pkg/std/
-          fi
 
           for commit in $commits; do
             short_sha=$(git rev-parse --short "$commit")
