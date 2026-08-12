@@ -325,9 +325,36 @@ jobs:
           fi
 
           cd source_repo
-          VERSION_NO_V="${GITHUB_REF_NAME#v}"
+          RELEASE_TAG="$GITHUB_REF_NAME"
+          VERSION_NO_V="${RELEASE_TAG#v}"
           COMMITS=$(git rev-list --reverse ${SOURCE_BASE_TAG}..${{ github.ref_name }})
-          FINAL_COMMIT=$(git rev-parse "${{ github.ref_name }}^{commit}")
+          FINAL_COMMIT=$(git rev-parse "$RELEASE_TAG^{commit}")
+          COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
+
+          if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::Release tag '$RELEASE_TAG' is not a valid White Language version."
+            exit 1
+          fi
+
+          stamp_release_metadata() {
+            awk -v version="$VERSION_NO_V" -v revision="$FINAL_COMMIT" -v commit_date="$COMMIT_DATE" '
+              BEGIN { versions = 0; revisions = 0; dates = 0 }
+              /^const VERSION -> String = / { print "const VERSION -> String = \"" version "\";"; versions++; next }
+              /^const REVISION -> String = / { print "const REVISION -> String = \"" revision "\";"; revisions++; next }
+              /^const COMMIT_DATE -> String = / { print "const COMMIT_DATE -> String = \"" commit_date "\";"; dates++; next }
+              { print }
+              END { if (versions != 1 || revisions != 1 || dates != 1) exit 2 }
+            ' src/wlc.wl > src/wlc.wl.release || {
+              rm -f src/wlc.wl.release
+              echo "::error::Could not stamp release metadata in src/wlc.wl."
+              exit 1
+            }
+            mv src/wlc.wl.release src/wlc.wl
+          }
+
+          echo "Release tag: $RELEASE_TAG"
+          echo "Release commit: $FINAL_COMMIT"
+          echo "Commit date: $COMMIT_DATE"
 
           GLOBAL_LLVM_BIN=$(cygpath -m "$PWD/../release_pkg/tools/llvm/bin")
           export PATH="$GLOBAL_LLVM_BIN:$PATH"
@@ -340,6 +367,9 @@ jobs:
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
+            if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
+              stamp_release_metadata
+            fi
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
             rm -rf "$ACTIVE_ENV/runtime_backup"
             if [ -d "$ACTIVE_ENV/runtime" ]; then cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"; fi
@@ -445,6 +475,7 @@ jobs:
             fi
           done
           git checkout ${{ env.TARGET_REF }}
+          stamp_release_metadata
 
           echo "================================================"
           echo " Starting Compiler Idempotency Check (Assembly)"
@@ -533,9 +564,36 @@ jobs:
           fi
 
           cd source_repo
-          VERSION_NO_V="${GITHUB_REF_NAME#v}"
+          RELEASE_TAG="$GITHUB_REF_NAME"
+          VERSION_NO_V="${RELEASE_TAG#v}"
           COMMITS=$(git rev-list --reverse ${SOURCE_BASE_TAG}..${{ github.ref_name }})
-          FINAL_COMMIT=$(git rev-parse "${{ github.ref_name }}^{commit}")
+          FINAL_COMMIT=$(git rev-parse "$RELEASE_TAG^{commit}")
+          COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
+
+          if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::Release tag '$RELEASE_TAG' is not a valid White Language version."
+            exit 1
+          fi
+
+          stamp_release_metadata() {
+            awk -v version="$VERSION_NO_V" -v revision="$FINAL_COMMIT" -v commit_date="$COMMIT_DATE" '
+              BEGIN { versions = 0; revisions = 0; dates = 0 }
+              /^const VERSION -> String = / { print "const VERSION -> String = \"" version "\";"; versions++; next }
+              /^const REVISION -> String = / { print "const REVISION -> String = \"" revision "\";"; revisions++; next }
+              /^const COMMIT_DATE -> String = / { print "const COMMIT_DATE -> String = \"" commit_date "\";"; dates++; next }
+              { print }
+              END { if (versions != 1 || revisions != 1 || dates != 1) exit 2 }
+            ' src/wlc.wl > src/wlc.wl.release || {
+              rm -f src/wlc.wl.release
+              echo "::error::Could not stamp release metadata in src/wlc.wl."
+              exit 1
+            }
+            mv src/wlc.wl.release src/wlc.wl
+          }
+
+          echo "Release tag: $RELEASE_TAG"
+          echo "Release commit: $FINAL_COMMIT"
+          echo "Commit date: $COMMIT_DATE"
 
           GLOBAL_LLVM_BIN="$PWD/../release_pkg/tools/llvm/bin"
           export PATH="$GLOBAL_LLVM_BIN:$PATH"
@@ -554,6 +612,9 @@ jobs:
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $SHORT_SHA"
             git checkout $COMMIT
+            if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
+              stamp_release_metadata
+            fi
 
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
             rm -rf "$ACTIVE_ENV/runtime_backup"
@@ -655,6 +716,7 @@ jobs:
             fi
           done
           git checkout ${{ env.TARGET_REF }}
+          stamp_release_metadata
 
           echo "================================================"
           echo " Starting Compiler Idempotency Check (Assembly)"
@@ -1150,6 +1212,33 @@ jobs:
           git config --global --add safe.directory /workspace/source_repo
           commits=$(git rev-list --reverse "$SOURCE_BASE_TAG..$TARGET_REF")
           final_commit=$(git rev-parse "$TARGET_REF^{commit}")
+          release_version=${TARGET_REF#v}
+          commit_date=$(git show -s --format=%cs "$final_commit")
+
+          if ! printf '%s\n' "$TARGET_REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "Invalid release tag '$TARGET_REF'." >&2
+            exit 1
+          fi
+
+          stamp_release_metadata() {
+            awk -v version="$release_version" -v revision="$final_commit" -v commit_date="$commit_date" '
+              BEGIN { versions = 0; revisions = 0; dates = 0 }
+              /^const VERSION -> String = / { print "const VERSION -> String = \"" version "\";"; versions++; next }
+              /^const REVISION -> String = / { print "const REVISION -> String = \"" revision "\";"; revisions++; next }
+              /^const COMMIT_DATE -> String = / { print "const COMMIT_DATE -> String = \"" commit_date "\";"; dates++; next }
+              { print }
+              END { if (versions != 1 || revisions != 1 || dates != 1) exit 2 }
+            ' src/wlc.wl > src/wlc.wl.release || {
+              rm -f src/wlc.wl.release
+              echo "Could not stamp release metadata in src/wlc.wl." >&2
+              exit 1
+            }
+            mv src/wlc.wl.release src/wlc.wl
+          }
+
+          echo "Release tag: $TARGET_REF"
+          echo "Release commit: $final_commit"
+          echo "Commit date: $commit_date"
           llvm_bin=/workspace/release_pkg/tools/llvm/bin
           export PATH="$llvm_bin:$PATH"
           active_wlc=/workspace/boot_env/bin/wlc
@@ -1161,6 +1250,9 @@ jobs:
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $short_sha"
             git checkout "$commit"
+            if [ "$commit" = "$final_commit" ]; then
+              stamp_release_metadata
+            fi
 
             cp -a "$active_env/std" "$active_env/std_backup"
             rm -rf "$active_env/runtime_backup"
@@ -1250,6 +1342,7 @@ jobs:
             fi
           done
           git checkout "$TARGET_REF"
+          stamp_release_metadata
 
           export WL_PATH=/workspace/release_pkg
           current=/workspace/release_pkg/bin/wlc
