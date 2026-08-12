@@ -82,7 +82,7 @@ jobs:
 
   build-and-package:
     name: Build for ${{ matrix.os_name }}
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.runner }}
 
     strategy:
@@ -1085,7 +1085,7 @@ jobs:
 
   build-linux-armv7:
     name: Build for linux-armv7
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
 
     steps:
@@ -1395,3 +1395,43 @@ jobs:
               --delete \
               --endpoint-url ${{ secrets.R2_ENDPOINT }}
           fi
+
+  sync-latest-to-r2:
+    name: Sync Latest Release to Cloudflare R2
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download latest release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::No published release was found."
+            exit 1
+          fi
+          mkdir -p all_assets
+          gh release download "$TAG" -R ${{ github.repository }} --dir all_assets
+          if [ -z "$(find all_assets -maxdepth 1 -type f -print -quit)" ]; then
+            echo "::error::Release '$TAG' has no assets."
+            exit 1
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Sync latest release assets to R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 sync all_assets/ "s3://${{ secrets.R2_BUCKET_NAME }}/$TAG/" \
+            --exclude "*Portable*" \
+            --delete \
+            --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+
+          aws s3 sync all_assets/ "s3://${{ secrets.R2_BUCKET_NAME }}/latest/" \
+            --exclude "*Portable*" \
+            --delete \
+            --endpoint-url "${{ secrets.R2_ENDPOINT }}"
