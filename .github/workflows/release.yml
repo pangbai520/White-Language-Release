@@ -7,11 +7,102 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Action to perform
+        type: choice
+        options:
+          - repair
+          - sync-r2
+        default: repair
+      release_tag:
+        description: Existing release tag to rebuild, such as v0.3.3
+        type: string
+        required: false
+      platform:
+        description: Platform to rebuild
+        type: choice
+        options:
+          - macos-x64
+          - macos-arm64
+          - windows-x64
+          - windows-x32
+          - linux-x64
+          - linux-x86
+          - linux-arm64
+          - linux-armv7
+        default: macos-x64
 
 permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    name: Prepare release build
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.config.outputs.matrix }}
+      release_tag: ${{ steps.config.outputs.release_tag }}
+      version: ${{ steps.config.outputs.version }}
+      platform: ${{ steps.config.outputs.platform }}
+      build_armv7: ${{ steps.config.outputs.build_armv7 }}
+      publish: ${{ steps.config.outputs.publish }}
+      full_release: ${{ steps.config.outputs.full_release }}
+    steps:
+      - name: Select build targets
+        id: config
+        shell: bash
+        env:
+          REQUESTED_OPERATION: ${{ inputs.operation }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
+        run: |
+          all_targets='[{"os_name":"windows-x64","runner":"windows-latest","artifact":"WhiteLanguage-Windows-x64-Setup.exe","llvm_repo":"mstorsjo/llvm-mingw","asset_keyword":"ucrt-x86_64.zip","archive_name":"llvm.zip","target_arch":"x86_64","package_arch":"x64","windows_target_dir":"x86_64-w64-mingw32"},{"os_name":"windows-x32","runner":"windows-latest","artifact":"WhiteLanguage-Windows-x32-Setup.exe","llvm_repo":"mstorsjo/llvm-mingw","asset_keyword":"ucrt-i686.zip","archive_name":"llvm.zip","target_arch":"i686","package_arch":"x32","windows_target_dir":"i686-w64-mingw32"},{"os_name":"macos-arm64","runner":"macos-14","artifact":"whitelang-macos-arm64.tar.gz","llvm_repo":"llvm/llvm-project","asset_keyword":"macOS-ARM64.tar.xz","archive_name":"llvm.tar.xz","target_arch":"aarch64"},{"os_name":"macos-x64","runner":"macos-15-intel","artifact":"whitelang-macos-x64.tar.gz","archive_name":"llvm.tar.xz","target_arch":"x86_64","reuse_toolchain":true},{"os_name":"linux-x64","runner":"ubuntu-latest","artifact":"whitelang-linux-x64.tar.gz","llvm_repo":"llvm/llvm-project","asset_keyword":"Linux-X64.tar.xz","archive_name":"llvm.tar.xz","target_arch":"x86_64"},{"os_name":"linux-x86","runner":"ubuntu-latest","artifact":"whitelang-linux-x86.tar.gz","archive_name":"llvm.tar.xz","target_arch":"i686","reuse_toolchain":true},{"os_name":"linux-arm64","runner":"ubuntu-24.04-arm","artifact":"whitelang-linux-arm64.tar.gz","llvm_repo":"llvm/llvm-project","asset_keyword":"Linux-ARM64.tar.xz","archive_name":"llvm.tar.xz","target_arch":"aarch64"}]'
+
+          if [ "$GITHUB_EVENT_NAME" = push ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+            platform=all
+            matrix="$all_targets"
+            build_armv7=true
+            publish=true
+            full_release=true
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$REQUESTED_OPERATION" = repair ]; then
+            release_tag="$REQUESTED_TAG"
+            platform="$REQUESTED_PLATFORM"
+            if ! printf '%s\n' "$release_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+              echo "::error::A valid release_tag is required for a repair build."
+              exit 1
+            fi
+            if [ "$platform" = linux-armv7 ]; then
+              matrix='[]'
+              build_armv7=true
+            else
+              matrix=$(printf '%s' "$all_targets" | jq -c --arg platform "$platform" '[.[] | select(.os_name == $platform)]')
+              if [ "$matrix" = '[]' ]; then
+                echo "::error::Unsupported repair platform '$platform'."
+                exit 1
+              fi
+              build_armv7=false
+            fi
+            publish=true
+            full_release=false
+          else
+            release_tag=""
+            platform=none
+            matrix='[]'
+            build_armv7=false
+            publish=false
+            full_release=false
+          fi
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+          echo "platform=$platform" >> "$GITHUB_OUTPUT"
+          echo "build_armv7=$build_armv7" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "full_release=$full_release" >> "$GITHUB_OUTPUT"
+
   warm-llvm-cache:
     name: Cache LLVM for ${{ matrix.os_name }}
     if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -82,83 +173,19 @@ jobs:
 
   build-and-package:
     name: Build for ${{ matrix.os_name }}
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: prepare-release
+    if: needs.prepare-release.outputs.matrix != '[]'
     runs-on: ${{ matrix.runner }}
+    env:
+      TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
+      VERSION_NO_V: ${{ needs.prepare-release.outputs.version }}
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os_name: windows-x64
-            runner: windows-latest
-            artifact: WhiteLanguage-Windows-x64-Setup.exe
-            llvm_repo: mstorsjo/llvm-mingw
-            asset_keyword: ucrt-x86_64.zip
-            archive_name: llvm.zip
-            target_arch: x86_64
-            package_arch: x64
-            windows_target_dir: x86_64-w64-mingw32
-
-          - os_name: windows-x32
-            runner: windows-latest
-            artifact: WhiteLanguage-Windows-x32-Setup.exe
-            llvm_repo: mstorsjo/llvm-mingw
-            asset_keyword: ucrt-i686.zip
-            archive_name: llvm.zip
-            target_arch: i686
-            package_arch: x32
-            windows_target_dir: i686-w64-mingw32
-
-          - os_name: macos-arm64
-            runner: macos-14
-            artifact: whitelang-macos-arm64.tar.gz
-            llvm_repo: llvm/llvm-project
-            asset_keyword: macOS-ARM64.tar.xz
-            archive_name: llvm.tar.xz
-            target_arch: aarch64
-
-          - os_name: macos-x64
-            runner: macos-15-intel
-            artifact: whitelang-macos-x64.tar.gz
-            archive_name: llvm.tar.xz
-            target_arch: x86_64
-            reuse_toolchain: true
-
-          - os_name: linux-x64
-            runner: ubuntu-latest
-            artifact: whitelang-linux-x64.tar.gz
-            llvm_repo: llvm/llvm-project
-            asset_keyword: Linux-X64.tar.xz
-            archive_name: llvm.tar.xz
-            target_arch: x86_64
-
-          - os_name: linux-x86
-            runner: ubuntu-latest
-            artifact: whitelang-linux-x86.tar.gz
-            archive_name: llvm.tar.xz
-            target_arch: i686
-            reuse_toolchain: true
-
-          - os_name: linux-arm64
-            runner: ubuntu-24.04-arm
-            artifact: whitelang-linux-arm64.tar.gz
-            llvm_repo: llvm/llvm-project
-            asset_keyword: Linux-ARM64.tar.xz
-            archive_name: llvm.tar.xz
-            target_arch: aarch64
+        include: ${{ fromJSON(needs.prepare-release.outputs.matrix) }}
 
     steps:
-      - name: Set Version Variable
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [[ "${{ github.ref }}" != refs/tags/* ]]; then
-            echo "TARGET_REF=main" >> $GITHUB_ENV
-            echo "IS_RELEASE=false" >> $GITHUB_ENV
-          else
-            echo "TARGET_REF=${{ github.ref_name }}" >> $GITHUB_ENV
-            echo "IS_RELEASE=true" >> $GITHUB_ENV
-          fi
-
       - name: Checkout Builder Repo
         uses: actions/checkout@v4
 
@@ -201,7 +228,7 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${{ github.ref_name }}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a previous release for ${{ matrix.os_name }}."
             exit 1
@@ -293,7 +320,7 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${{ github.ref_name }}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
 
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a valid previous release tag to bootstrap from."
@@ -325,9 +352,9 @@ jobs:
           fi
 
           cd source_repo
-          RELEASE_TAG="$GITHUB_REF_NAME"
+          RELEASE_TAG="$TARGET_REF"
           VERSION_NO_V="${RELEASE_TAG#v}"
-          COMMITS=$(git rev-list --reverse ${SOURCE_BASE_TAG}..${{ github.ref_name }})
+          COMMITS=$(git rev-list --reverse "${SOURCE_BASE_TAG}..${TARGET_REF}")
           FINAL_COMMIT=$(git rev-parse "$RELEASE_TAG^{commit}")
           COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
 
@@ -593,7 +620,7 @@ jobs:
         run: |
           mkdir -p boot_env boot_dl
           RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${{ github.ref_name }}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
 
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a valid previous release tag to bootstrap from."
@@ -609,9 +636,9 @@ jobs:
           fi
 
           cd source_repo
-          RELEASE_TAG="$GITHUB_REF_NAME"
+          RELEASE_TAG="$TARGET_REF"
           VERSION_NO_V="${RELEASE_TAG#v}"
-          COMMITS=$(git rev-list --reverse ${SOURCE_BASE_TAG}..${{ github.ref_name }})
+          COMMITS=$(git rev-list --reverse "${SOURCE_BASE_TAG}..${TARGET_REF}")
           FINAL_COMMIT=$(git rev-parse "$RELEASE_TAG^{commit}")
           COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
 
@@ -1175,7 +1202,7 @@ jobs:
         shell: powershell
         run: |
           mkdir -Force Output
-          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $tagVersion = "$env:VERSION_NO_V"
           $outName = "WhiteLanguage-Windows-${{ matrix.package_arch }}-Setup-$tagVersion"
           iscc /dAppVersion="$tagVersion" /dAppArch="${{ matrix.package_arch }}" /O"Output" /F"$outName" whitelang.iss
 
@@ -1190,7 +1217,7 @@ jobs:
         if: startsWith(matrix.os_name, 'windows')
         shell: pwsh
         run: |
-          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $tagVersion = "$env:VERSION_NO_V"
           $zipName = "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-$tagVersion.zip"
           Compress-Archive -Path "release_pkg\*" -DestinationPath "Output\$zipName" -Force
 
@@ -1198,7 +1225,7 @@ jobs:
         id: prep_name
         shell: bash
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION="$VERSION_NO_V"
           cd Output
           if [ -f "whitelang-${{ matrix.os_name }}.tar.gz" ]; then
             mv "whitelang-${{ matrix.os_name }}.tar.gz" "whitelang-${{ matrix.os_name }}-${VERSION}.tar.gz"
@@ -1221,20 +1248,14 @@ jobs:
 
   build-linux-armv7:
     name: Build for linux-armv7
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: prepare-release
+    if: needs.prepare-release.outputs.build_armv7 == 'true'
     runs-on: ubuntu-latest
+    env:
+      TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
+      VERSION_NO_V: ${{ needs.prepare-release.outputs.version }}
 
     steps:
-      - name: Set version variables
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [[ "${{ github.ref }}" != refs/tags/* ]]; then
-            echo "TARGET_REF=main" >> "$GITHUB_ENV"
-          else
-            echo "TARGET_REF=${{ github.ref_name }}" >> "$GITHUB_ENV"
-          fi
-          echo "VERSION_NO_V=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
       - name: Checkout release repository
         uses: actions/checkout@v4
 
@@ -1255,7 +1276,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p boot_env boot_dl release_pkg/bin release_pkg/std Output Output_Snapshots
-          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${{ github.ref_name }}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a previous release for linux-armv7."
             exit 1
@@ -1559,8 +1580,13 @@ jobs:
 
   publish-release:
     name: Publish release assets
-    needs: [build-and-package, build-linux-armv7]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare-release, build-and-package, build-linux-armv7]
+    if: >-
+      always() &&
+      needs.prepare-release.outputs.publish == 'true' &&
+      ((needs.prepare-release.outputs.platform == 'all' && needs.build-and-package.result == 'success' && needs.build-linux-armv7.result == 'success') ||
+       (needs.prepare-release.outputs.platform == 'linux-armv7' && needs.build-linux-armv7.result == 'success') ||
+       (needs.prepare-release.outputs.platform != 'all' && needs.prepare-release.outputs.platform != 'linux-armv7' && needs.build-and-package.result == 'success'))
     runs-on: ubuntu-latest
     steps:
       - name: Download release assets
@@ -1580,20 +1606,21 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare-release.outputs.release_tag }}
           files: all_assets/*
 
       - name: Publish bootstrap snapshots
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}-snapshots
-          name: snapshots-${{ github.ref_name }}
+          tag_name: ${{ needs.prepare-release.outputs.release_tag }}-snapshots
+          name: snapshots-${{ needs.prepare-release.outputs.release_tag }}
           prerelease: true
           files: all_snapshots/*
 
   promote-to-r2:
     name: Sync Assets to Cloudflare R2
-    needs: publish-release
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare-release, publish-release]
+    if: needs.prepare-release.outputs.full_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download all platforms assets
@@ -1610,7 +1637,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          TAG="${{ github.ref_name }}"
+          TAG="${{ needs.prepare-release.outputs.release_tag }}"
           DOT_COUNT=$(echo $TAG | tr -cd '.' | wc -c)
 
           if [ "$DOT_COUNT" -eq 1 ]; then
@@ -1627,7 +1654,7 @@ jobs:
 
   sync-latest-to-r2:
     name: Sync Latest Release to Cloudflare R2
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'sync-r2'
     runs-on: ubuntu-latest
     steps:
       - name: Download latest release assets
