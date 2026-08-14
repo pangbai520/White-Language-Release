@@ -517,40 +517,45 @@ jobs:
           stamp_release_metadata
 
           echo "================================================"
-          echo " Starting Compiler Idempotency Check (Assembly)"
+          echo " Starting Compiler Idempotency Check (LLVM IR)"
           echo "================================================"
           export WL_PATH=$(cygpath -m "$PWD/../release_pkg")
-          OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump.exe"
           WLC_CURRENT=$(cygpath -m "$PWD/../release_pkg/bin/wlc.exe")
           WLC_NEXT=$(cygpath -m "$PWD/../release_pkg/bin/wlc_next.exe")
-          clean_objdump() {
-            "$OBJDUMP_CMD" -d "$1" | awk '!/file format/ && NF' > "$2"
+          emit_compiler_ir() {
+            rm -f src/wlc.ll
+            run_bootstrap_attempt "$1" src/wlc.wl -S --emit-llvm -Oz || return $?
+            if [ ! -s src/wlc.ll ]; then
+              echo "::error::Compiler did not emit src/wlc.ll."
+              return 1
+            fi
+            mv -f src/wlc.ll "$2"
           }
 
-          clean_objdump "$WLC_CURRENT" "../wlc_current.asm"
+          emit_compiler_ir "$WLC_CURRENT" "../wlc_current.ll"
 
           MATCH=false
           for TRY in 1 2 3; do
             echo "Fixpoint Try #$TRY..."
-            "$WLC_CURRENT" src/wlc.wl $ICON_ARG -o "$WLC_NEXT" -Oz
-            clean_objdump "$WLC_NEXT" "../wlc_next.asm"
+            run_bootstrap_attempt "$WLC_CURRENT" src/wlc.wl $ICON_ARG -o "$WLC_NEXT" -Oz
+            emit_compiler_ir "$WLC_NEXT" "../wlc_next.ll"
 
-            if diff -u "../wlc_current.asm" "../wlc_next.asm" > ../diff.log; then
-              echo "Assembly strictly matches! Fixpoint reached at try #$TRY."
+            if diff -u "../wlc_current.ll" "../wlc_next.ll" > ../diff.log; then
+              echo "LLVM IR strictly matches! Fixpoint reached at try #$TRY."
               MATCH=true
               mv -f "$WLC_NEXT" "$WLC_CURRENT"
               break
             else
-              echo "Assembly mismatch on try #$TRY. Diff preview (first 20 lines):"
+              echo "LLVM IR mismatch on try #$TRY. Diff preview (first 20 lines):"
               head -n 20 ../diff.log
               mv -f "$WLC_NEXT" "$WLC_CURRENT"
-              mv -f "../wlc_next.asm" "../wlc_current.asm"
+              mv -f "../wlc_next.ll" "../wlc_current.ll"
             fi
           done
 
-          rm -f ../wlc_current.asm ../wlc_next.asm ../diff.log
+          rm -f ../wlc_current.ll ../wlc_next.ll ../diff.log src/wlc.ll
           if [ "$MATCH" = false ]; then
-            echo "::error::Compiler failed to reach fixpoint after 3 tries. Assembly still diverges!"
+            echo "::error::Compiler failed to reach fixpoint after 3 tries. LLVM IR still diverges!"
             exit 1
           fi
 
@@ -559,12 +564,13 @@ jobs:
           echo " Starting C Runtime Determinism Check (Assembly)"
           echo "================================================"
           if [ -f runtime/wl_runtime.c ] && [ -f ../release_pkg/runtime/wl_runtime.obj ]; then
+            OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump.exe"
             RT_CURRENT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime.obj")
             RT_NEXT=$(cygpath -m "$PWD/../release_pkg/runtime/wl_runtime_next.obj")
 
-            clean_objdump "$RT_CURRENT" "../rt_current.asm"
+            "$OBJDUMP_CMD" -d "$RT_CURRENT" | awk '!/file format/ && NF' > "../rt_current.asm"
             "$GLOBAL_LLVM_BIN/clang.exe" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
-            clean_objdump "$RT_NEXT" "../rt_next.asm"
+            "$OBJDUMP_CMD" -d "$RT_NEXT" | awk '!/file format/ && NF' > "../rt_next.asm"
 
             if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
               echo "C Runtime assembly strictly matches! Deterministic build confirmed."
@@ -797,42 +803,46 @@ jobs:
           stamp_release_metadata
 
           echo "================================================"
-          echo " Starting Compiler Idempotency Check (Assembly)"
+          echo " Starting Compiler Idempotency Check (LLVM IR)"
           echo "================================================"
           export WL_PATH="$PWD/../release_pkg"
-          OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump"
-          if [ "${{ matrix.os_name }}" == "linux-x86" ]; then OBJDUMP_CMD="objdump"; fi
           WLC_CURRENT="$PWD/../release_pkg/bin/wlc"
           WLC_NEXT="$PWD/../release_pkg/bin/wlc_next"
 
-          clean_objdump() {
-            "$OBJDUMP_CMD" -d "$1" | awk '!/file format/ && NF' > "$2"
+          emit_compiler_ir() {
+            rm -f src/wlc.ll
+            run_bootstrap_attempt "$1" src/wlc.wl -S --emit-llvm -Oz || return $?
+            if [ ! -s src/wlc.ll ]; then
+              echo "::error::Compiler did not emit src/wlc.ll."
+              return 1
+            fi
+            mv -f src/wlc.ll "$2"
           }
 
-          clean_objdump "$WLC_CURRENT" "../wlc_current.asm"
+          emit_compiler_ir "$WLC_CURRENT" "../wlc_current.ll"
 
           MATCH=false
           for TRY in 1 2 3; do
             echo "Fixpoint Try #$TRY..."
-            "$WLC_CURRENT" src/wlc.wl -o "$WLC_NEXT" -Oz
-            clean_objdump "$WLC_NEXT" "../wlc_next.asm"
+            run_bootstrap_attempt "$WLC_CURRENT" src/wlc.wl -o "$WLC_NEXT" -Oz
+            emit_compiler_ir "$WLC_NEXT" "../wlc_next.ll"
 
-            if diff -u "../wlc_current.asm" "../wlc_next.asm" > ../diff.log; then
-              echo "Assembly strictly matches! Fixpoint reached at try #$TRY."
+            if diff -u "../wlc_current.ll" "../wlc_next.ll" > ../diff.log; then
+              echo "LLVM IR strictly matches! Fixpoint reached at try #$TRY."
               MATCH=true
               mv -f "$WLC_NEXT" "$WLC_CURRENT"
               break
             else
-              echo "Assembly mismatch on try #$TRY. Diff preview (first 20 lines):"
+              echo "LLVM IR mismatch on try #$TRY. Diff preview (first 20 lines):"
               head -n 20 ../diff.log
               mv -f "$WLC_NEXT" "$WLC_CURRENT"
-              mv -f "../wlc_next.asm" "../wlc_current.asm"
+              mv -f "../wlc_next.ll" "../wlc_current.ll"
             fi
           done
 
-          rm -f ../wlc_current.asm ../wlc_next.asm ../diff.log
+          rm -f ../wlc_current.ll ../wlc_next.ll ../diff.log src/wlc.ll
           if [ "$MATCH" = false ]; then
-            echo "::error::Compiler failed to reach fixpoint after 3 tries. Assembly still diverges!"
+            echo "::error::Compiler failed to reach fixpoint after 3 tries. LLVM IR still diverges!"
             exit 1
           fi
 
@@ -841,12 +851,14 @@ jobs:
           echo " Starting C Runtime Determinism Check (Assembly)"
           echo "================================================"
           if [ -f runtime/wl_runtime.c ] && [ -f ../release_pkg/runtime/wl_runtime.o ]; then
+            OBJDUMP_CMD="$GLOBAL_LLVM_BIN/llvm-objdump"
+            if [ "${{ matrix.os_name }}" == "linux-x86" ]; then OBJDUMP_CMD="objdump"; fi
             RT_CURRENT="$PWD/../release_pkg/runtime/wl_runtime.o"
             RT_NEXT="$PWD/../release_pkg/runtime/wl_runtime_next.o"
 
-            clean_objdump "$RT_CURRENT" "../rt_current.asm"
+            "$OBJDUMP_CMD" -d "$RT_CURRENT" | awk '!/file format/ && NF' > "../rt_current.asm"
             "$GLOBAL_LLVM_BIN/clang" -c runtime/wl_runtime.c -o "$RT_NEXT" -O2
-            clean_objdump "$RT_NEXT" "../rt_next.asm"
+            "$OBJDUMP_CMD" -d "$RT_NEXT" | awk '!/file format/ && NF' > "../rt_next.asm"
 
             if diff -u "../rt_current.asm" "../rt_next.asm" > ../diff_rt.log; then
               echo "C Runtime assembly strictly matches! Deterministic build confirmed."
@@ -1192,36 +1204,20 @@ jobs:
             mv "whitelang-${{ matrix.os_name }}.tar.gz" "whitelang-${{ matrix.os_name }}-${VERSION}.tar.gz"
           fi
 
-      - name: Upload Final Artifacts to Main Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: Output/*
-
-      - name: Upload Snapshots to Separate Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          tag_name: ${{ github.ref_name }}-snapshots
-          name: snapshots-${{ github.ref_name }}
-          prerelease: true
-          files: Output_Snapshots/*
-
-      - name: Stash for latest promotion
+      - name: Store release assets
         uses: actions/upload-artifact@v4
         with:
           name: assets-${{ matrix.os_name }}
           path: Output/
-          retention-days: 1
+          retention-days: 7
 
-      - name: Cleanup Tag on Failure
-        if: failure() && startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Workflow failed! Deleting tag ${{ github.ref_name }} from remote..."
-          git push --delete origin ${{ github.ref_name }} || true
+      - name: Store bootstrap snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-${{ matrix.os_name }}
+          path: Output_Snapshots/
+          if-no-files-found: ignore
+          retention-days: 7
 
   build-linux-armv7:
     name: Build for linux-armv7
@@ -1322,7 +1318,7 @@ jobs:
           active_wlc=/workspace/boot_env/bin/wlc
           active_env=/workspace/boot_env
           chmod +x "$active_wlc" "$llvm_bin/clang" 2>/dev/null || true
-          WLC_BOOTSTRAP_TIMEOUT_SECONDS=1200
+          WLC_BOOTSTRAP_TIMEOUT_SECONDS=600
 
           run_bootstrap_attempt() {
             timeout_seconds=${WLC_BOOTSTRAP_TIMEOUT_SECONDS:-300}
@@ -1546,38 +1542,57 @@ jobs:
           tar -czf "/workspace/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C /workspace/release_pkg .
           ARMV7
 
-      - name: Upload ARMv7 release asset
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: Output/*
-
-      - name: Upload ARMv7 snapshots
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          tag_name: ${{ github.ref_name }}-snapshots
-          name: snapshots-${{ github.ref_name }}
-          prerelease: true
-          files: Output_Snapshots/*
-
-      - name: Stash ARMv7 asset for latest promotion
+      - name: Store ARMv7 release asset
         uses: actions/upload-artifact@v4
         with:
           name: assets-linux-armv7
           path: Output/
-          retention-days: 1
+          retention-days: 7
 
-      - name: Cleanup tag on failure
-        if: failure() && startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: git push --delete origin "${{ github.ref_name }}" || true
+      - name: Store ARMv7 bootstrap snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-linux-armv7
+          path: Output_Snapshots/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish-release:
+    name: Publish release assets
+    needs: [build-and-package, build-linux-armv7]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: all_assets
+          pattern: assets-*
+          merge-multiple: true
+
+      - name: Download bootstrap snapshots
+        uses: actions/download-artifact@v4
+        with:
+          path: all_snapshots
+          pattern: snapshots-*
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: all_assets/*
+
+      - name: Publish bootstrap snapshots
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}-snapshots
+          name: snapshots-${{ github.ref_name }}
+          prerelease: true
+          files: all_snapshots/*
 
   promote-to-r2:
     name: Sync Assets to Cloudflare R2
-    needs: [build-and-package, build-linux-armv7]
+    needs: publish-release
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
