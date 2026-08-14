@@ -362,6 +362,34 @@ jobs:
           ACTIVE_WLC=$(cygpath -m "$(find "$PWD/../boot_env" -name wlc.exe | head -n 1)")
           ACTIVE_ENV=$(cygpath -m "$(dirname $(dirname "$ACTIVE_WLC"))")
 
+          run_bootstrap_attempt() {
+            local timeout_seconds="${WLC_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
+            local marker="/tmp/wlc-bootstrap-timeout-$$-$RANDOM"
+            local status=0
+            rm -f "$marker"
+            "$@" &
+            local compiler_pid=$!
+            (
+              sleep "$timeout_seconds"
+              if kill -0 "$compiler_pid" 2>/dev/null; then
+                echo "::warning::Bootstrap compiler exceeded ${timeout_seconds}s; trying the next compatibility fallback."
+                : > "$marker"
+                kill "$compiler_pid" 2>/dev/null || true
+                sleep 5
+                kill -9 "$compiler_pid" 2>/dev/null || true
+              fi
+            ) &
+            local watchdog_pid=$!
+            wait "$compiler_pid" || status=$?
+            kill "$watchdog_pid" 2>/dev/null || true
+            wait "$watchdog_pid" 2>/dev/null || true
+            if [ -f "$marker" ]; then
+              rm -f "$marker"
+              return 124
+            fi
+            return "$status"
+          }
+
           for COMMIT in $COMMITS; do
             SHORT_SHA=$(git rev-parse --short $COMMIT)
             echo "------------------------------------------------"
@@ -413,22 +441,30 @@ jobs:
 
             echo "Stage 1: Trying [New STD + $NEW_RT_LABEL]..."
             apply_env new_std new_rt
-            if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
+            if run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
               echo "[New STD + $NEW_RT_LABEL] succeeded."
+            elif [ "$HAS_NATIVE_RT" = false ]; then
+              echo "Failed. Trying [Old STD + No RT]..."
+              apply_env old_std new_rt
+              if ! run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
+                echo "All fallback combinations failed!"
+                exit 1
+              fi
+              echo "[Old STD + No RT] succeeded."
             else
               echo "Failed. Trying [New STD + Old RT]..."
               apply_env new_std old_rt
-              if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
+              if run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
                 echo "[New STD + Old RT] succeeded."
               else
                 echo "Failed. Trying [Old STD + $NEW_RT_LABEL]..."
                 apply_env old_std new_rt
-                if "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
+                if run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
                   echo "[Old STD + $NEW_RT_LABEL] succeeded."
                 else
                   echo "Failed. Trying [Old STD + Old RT]..."
                   apply_env old_std old_rt
-                  if ! "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
+                  if ! run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc_temp.exe -Oz; then
                     echo "All fallback combinations failed!"
                     exit 1
                   fi
@@ -439,7 +475,10 @@ jobs:
 
             echo "Stage 2: Finalizing with latest STD and runtime state..."
             apply_env new_std new_rt
-            "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -Oz
+            if ! run_bootstrap_attempt "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -Oz; then
+              echo "::error::Stage 2 failed or exceeded the bootstrap timeout."
+              exit 1
+            fi
             rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe "$ACTIVE_ENV/runtime/wl_runtime_new.obj"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
@@ -602,6 +641,34 @@ jobs:
           ACTIVE_ENV="$PWD/../boot_env"
           chmod +x "$ACTIVE_WLC"
 
+          run_bootstrap_attempt() {
+            local timeout_seconds="${WLC_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
+            local marker="/tmp/wlc-bootstrap-timeout-$$-$RANDOM"
+            local status=0
+            rm -f "$marker"
+            "$@" &
+            local compiler_pid=$!
+            (
+              sleep "$timeout_seconds"
+              if kill -0 "$compiler_pid" 2>/dev/null; then
+                echo "::warning::Bootstrap compiler exceeded ${timeout_seconds}s; trying the next compatibility fallback."
+                : > "$marker"
+                kill "$compiler_pid" 2>/dev/null || true
+                sleep 5
+                kill -9 "$compiler_pid" 2>/dev/null || true
+              fi
+            ) &
+            local watchdog_pid=$!
+            wait "$compiler_pid" || status=$?
+            kill "$watchdog_pid" 2>/dev/null || true
+            wait "$watchdog_pid" 2>/dev/null || true
+            if [ -f "$marker" ]; then
+              rm -f "$marker"
+              return 124
+            fi
+            return "$status"
+          }
+
           if [[ "${{ matrix.os_name }}" == macos-* ]]; then
             export SDKROOT=$(xcrun --show-sdk-path)
             export MACOSX_DEPLOYMENT_TARGET=11.0
@@ -654,22 +721,30 @@ jobs:
 
             echo "Stage 1: Trying [New STD + $NEW_RT_LABEL]..."
             apply_env new_std new_rt
-            if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
+            if run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
               echo "[New STD + $NEW_RT_LABEL] succeeded."
+            elif [ "$HAS_NATIVE_RT" = false ]; then
+              echo "Failed. Trying [Old STD + No RT]..."
+              apply_env old_std new_rt
+              if ! run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
+                echo "All fallback combinations failed!"
+                exit 1
+              fi
+              echo "[Old STD + No RT] succeeded."
             else
               echo "Failed. Trying [New STD + Old RT]..."
               apply_env new_std old_rt
-              if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
+              if run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
                 echo "[New STD + Old RT] succeeded."
               else
                 echo "Failed. Trying [Old STD + $NEW_RT_LABEL]..."
                 apply_env old_std new_rt
-                if "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
+                if run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
                   echo "[Old STD + $NEW_RT_LABEL] succeeded."
                 else
                   echo "Failed. Trying [Old STD + Old RT]..."
                   apply_env old_std old_rt
-                  if ! "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
+                  if ! run_bootstrap_attempt "$ACTIVE_WLC" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc_temp -Oz; then
                     echo "All fallback combinations failed!"
                     exit 1
                   fi
@@ -680,7 +755,10 @@ jobs:
 
             echo "Stage 2: Finalizing with latest STD and runtime state..."
             apply_env new_std new_rt
-            "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -Oz
+            if ! run_bootstrap_attempt "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -Oz; then
+              echo "::error::Stage 2 failed or exceeded the bootstrap timeout."
+              exit 1
+            fi
             rm -f ../build_${SHORT_SHA}/bin/wlc_temp "$ACTIVE_ENV/runtime/wl_runtime_new.o"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
@@ -1244,6 +1322,35 @@ jobs:
           active_wlc=/workspace/boot_env/bin/wlc
           active_env=/workspace/boot_env
           chmod +x "$active_wlc" "$llvm_bin/clang" 2>/dev/null || true
+          WLC_BOOTSTRAP_TIMEOUT_SECONDS=1200
+
+          run_bootstrap_attempt() {
+            timeout_seconds=${WLC_BOOTSTRAP_TIMEOUT_SECONDS:-300}
+            marker="/tmp/wlc-bootstrap-timeout-$$"
+            status=0
+            rm -f "$marker"
+            "$@" &
+            compiler_pid=$!
+            (
+              sleep "$timeout_seconds"
+              if kill -0 "$compiler_pid" 2>/dev/null; then
+                echo "Bootstrap compiler exceeded ${timeout_seconds}s; trying the next compatibility fallback." >&2
+                : > "$marker"
+                kill "$compiler_pid" 2>/dev/null || true
+                sleep 5
+                kill -9 "$compiler_pid" 2>/dev/null || true
+              fi
+            ) &
+            watchdog_pid=$!
+            wait "$compiler_pid" || status=$?
+            kill "$watchdog_pid" 2>/dev/null || true
+            wait "$watchdog_pid" 2>/dev/null || true
+            if [ -f "$marker" ]; then
+              rm -f "$marker"
+              return 124
+            fi
+            return "$status"
+          }
 
           for commit in $commits; do
             short_sha=$(git rev-parse --short "$commit")
@@ -1293,29 +1400,43 @@ jobs:
 
             echo "Stage 1: Trying [New STD + $new_rt_label]..."
             apply_env new_std new_rt
-            if "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+            if run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
               echo "[New STD + $new_rt_label] succeeded."
+            elif [ "$has_native_rt" = false ]; then
+              echo "Failed. Trying [Old STD + No RT]..."
+              apply_env old_std new_rt
+              if ! run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+                echo "All fallback combinations failed!" >&2
+                exit 1
+              fi
+              echo "[Old STD + No RT] succeeded."
             else
               echo "Failed. Trying [New STD + Old RT]..."
               apply_env new_std old_rt
-              if "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+              if run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
                 echo "[New STD + Old RT] succeeded."
               else
                 echo "Failed. Trying [Old STD + $new_rt_label]..."
                 apply_env old_std new_rt
-                if "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+                if run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
                   echo "[Old STD + $new_rt_label] succeeded."
                 else
                   echo "Failed. Trying [Old STD + Old RT]..."
                   apply_env old_std old_rt
-                  "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz
+                  if ! run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
+                    echo "All fallback combinations failed!" >&2
+                    exit 1
+                  fi
                 fi
               fi
             fi
 
             echo "Stage 2: Finalizing with the current standard library..."
             apply_env new_std new_rt
-            "$build_dir/bin/wlc_temp" src/wlc.wl -o "$build_dir/bin/wlc" -Oz
+            if ! run_bootstrap_attempt "$build_dir/bin/wlc_temp" src/wlc.wl -o "$build_dir/bin/wlc" -Oz; then
+              echo "Stage 2 failed or exceeded the bootstrap timeout." >&2
+              exit 1
+            fi
             rm -f "$build_dir/bin/wlc_temp" "$active_env/runtime/wl_runtime_new.o"
             rm -rf "$active_env/std_backup" "$active_env/runtime_backup"
             if [ "$has_native_rt" = true ]; then
