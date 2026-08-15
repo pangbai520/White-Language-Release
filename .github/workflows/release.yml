@@ -1288,7 +1288,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          sudo apt-get install -y --no-install-recommends qemu-user qemu-user-binfmt gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          sudo systemctl restart systemd-binfmt
+          if [ ! -e /proc/sys/fs/binfmt_misc/qemu-arm ]; then
+            echo "::error::Could not register the ARMv7 binary format handler."
+            exit 1
+          fi
 
           mkdir -p arm_dl host_env release_pkg/bin release_pkg/std Output Output_Snapshots
           PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
@@ -1309,12 +1314,16 @@ jobs:
 
           # keep cross links on packaged LLD instead of the runner's x86 GNU ld
           HOST_LLVM="$PWD/host_env/tools/llvm/bin"
-          if [ ! -x "$HOST_LLVM/ld.lld" ]; then
-            echo "::error::The native Linux x64 package does not contain ld.lld."
+          ARM_LLVM="$PWD/release_pkg/tools/llvm/bin"
+          if [ ! -x "$HOST_LLVM/ld.lld" ] || [ ! -x "$ARM_LLVM/ld.lld" ]; then
+            echo "::error::The native or ARMv7 compiler package does not contain ld.lld."
             exit 1
           fi
           printf '%s\n' '-fuse-ld=lld' '--gcc-toolchain=/usr' > "$HOST_LLVM/armv7-unknown-linux-gnueabihf.cfg"
           cp "$HOST_LLVM/armv7-unknown-linux-gnueabihf.cfg" "$HOST_LLVM/armv7-unknown-linux-gnueabihf-clang.cfg"
+          printf '%s\n' '-fuse-ld=lld' '--gcc-toolchain=/usr' > "$ARM_LLVM/armv7-unknown-linux-gnueabihf.cfg"
+          cp "$ARM_LLVM/armv7-unknown-linux-gnueabihf.cfg" "$ARM_LLVM/armv7-unknown-linux-gnueabihf-clang.cfg"
+          cp "$ARM_LLVM/armv7-unknown-linux-gnueabihf.cfg" "$ARM_LLVM/clang.cfg"
 
           echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
 
@@ -1329,7 +1338,8 @@ jobs:
           RELEASE_VERSION=${TARGET_REF#v}
           COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
           CROSS_TARGET=armv7-unknown-linux-gnueabihf
-          CROSS_SYSROOT=/usr/arm-linux-gnueabihf
+          QEMU_ROOT=/usr/arm-linux-gnueabihf
+          export QEMU_LD_PREFIX="$QEMU_ROOT"
           HOST_ENV="$GITHUB_WORKSPACE/host_env"
           HOST_WLC="$HOST_ENV/bin/wlc"
           ARM_ENV="$GITHUB_WORKSPACE/release_pkg"
@@ -1355,17 +1365,17 @@ jobs:
             ' src/wlc.wl > src/wlc.wl.release
             mv src/wlc.wl.release src/wlc.wl
           }
-          compile_arm() { WL_PATH="$HOST_ENV" "$HOST_WLC" "$@" --target="$CROSS_TARGET" --sysroot="$CROSS_SYSROOT"; }
-          run_arm() { WL_PATH="$ARM_ENV" qemu-arm -L "$CROSS_SYSROOT" "$@"; }
+          compile_arm() { WL_PATH="$HOST_ENV" "$HOST_WLC" "$@" --target="$CROSS_TARGET"; }
+          run_arm() { WL_PATH="$ARM_ENV" qemu-arm -L "$QEMU_ROOT" "$@"; }
           emit_host_ir() {
             rm -f src/wlc.ll
-            compile_arm src/wlc.wl -S --emit-llvm -Oz
+            WL_PATH="$ARM_ENV" "$HOST_WLC" src/wlc.wl -S --emit-llvm -Oz --target="$CROSS_TARGET"
             test -s src/wlc.ll
             mv src/wlc.ll "$1"
           }
           emit_arm_ir() {
             rm -f src/wlc.ll
-            timeout 600s env WL_PATH="$ARM_ENV" qemu-arm -L "$CROSS_SYSROOT" "$ARM_WLC" src/wlc.wl -S --emit-llvm -Oz
+            timeout 600s env WL_PATH="$ARM_ENV" qemu-arm -L "$QEMU_ROOT" "$ARM_WLC" src/wlc.wl -S --emit-llvm -Oz
             test -s src/wlc.ll
             mv src/wlc.ll "$1"
           }
@@ -1387,7 +1397,7 @@ jobs:
 
           echo "Checking the packaged ARMv7 driver..."
           run_arm "$ARM_WLC" --version
-          timeout 600s env WL_PATH="$ARM_ENV" qemu-arm -L "$CROSS_SYSROOT" "$ARM_WLC" tests/integration/os/test_sys_platform.wl -o "$GITHUB_WORKSPACE/arm_wlc_smoke"
+          timeout 600s env WL_PATH="$ARM_ENV" qemu-arm -L "$QEMU_ROOT" "$ARM_WLC" tests/integration/os/test_sys_platform.wl -o "$GITHUB_WORKSPACE/arm_wlc_smoke"
           SMOKE_OUTPUT=$(run_arm "$GITHUB_WORKSPACE/arm_wlc_smoke" 2>&1)
           printf '%s\n' "$SMOKE_OUTPUT" | grep -Fq 'PASS:'
           rm -f "$GITHUB_WORKSPACE/arm_wlc_smoke"
@@ -1419,16 +1429,27 @@ jobs:
             rm -f "$GITHUB_WORKSPACE/diagnostic_bin"
             BUILD_OUTPUT=$(compile_arm "$TEST_FILE" -o "$GITHUB_WORKSPACE/diagnostic_bin" 2>&1) || BUILD_STATUS=$?
             BUILD_STATUS=${BUILD_STATUS:-0}
+            RUN_OUTPUT=""
+            RUN_STATUS=0
             if [ "$BUILD_STATUS" -eq 0 ]; then
-              echo "diagnostic test unexpectedly compiled: $TEST_FILE" >&2
+              RUN_OUTPUT=$(run_arm "$GITHUB_WORKSPACE/diagnostic_bin" 2>&1) || RUN_STATUS=$?
+            fi
+
+            OUTPUT="$BUILD_OUTPUT"
+            if [ -n "$RUN_OUTPUT" ]; then
+              OUTPUT="${OUTPUT}"$'\n'"${RUN_OUTPUT}"
+            fi
+            if [ "$BUILD_STATUS" -eq 0 ] && [ "$RUN_STATUS" -eq 0 ]; then
+              echo "diagnostic test completed successfully: $TEST_FILE" >&2
+              echo "expected: $EXPECTED" >&2
               exit 1
             fi
-            if ! printf '%s\n' "$BUILD_OUTPUT" | grep -Fq "$EXPECTED"; then
-              printf '%s\n' "$BUILD_OUTPUT"
+            if ! printf '%s\n' "$OUTPUT" | grep -Fq "$EXPECTED"; then
+              printf '%s\n' "$OUTPUT"
               echo "expected diagnostic was not produced: $EXPECTED" >&2
               exit 1
             fi
-            unset BUILD_STATUS
+            unset BUILD_STATUS RUN_STATUS
           done < "$GITHUB_WORKSPACE/diagnostic-tests.txt"
 
           FFI=tests/integration/ffi
@@ -1437,10 +1458,10 @@ jobs:
           compile_arm test_lib_export.wl --shared
           arm-linux-gnueabihf-gcc test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
           export LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          C_OUTPUT=$(qemu-arm -L "$CROSS_SYSROOT" ./test_c_host 2>&1)
+          C_OUTPUT=$(qemu-arm -L "$QEMU_ROOT" ./test_c_host 2>&1)
           printf '%s\n' "$C_OUTPUT" | grep -Fq 'PASS:'
           compile_arm test_dll_host.wl libtest_lib_export.so -o test_wl_host
-          WL_OUTPUT=$(qemu-arm -L "$CROSS_SYSROOT" ./test_wl_host 2>&1)
+          WL_OUTPUT=$(qemu-arm -L "$QEMU_ROOT" ./test_wl_host 2>&1)
           printf '%s\n' "$WL_OUTPUT" | grep -Fq 'PASS:'
           echo "ARMv7 Python FFI is covered by native Linux jobs; C and White hosts cover the ARMv7 ABI."
 
