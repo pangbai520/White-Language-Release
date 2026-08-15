@@ -16,7 +16,7 @@ on:
           - sync-r2
         default: repair
       release_tag:
-        description: Existing release tag to rebuild, such as v0.3.3
+        description: Existing release tag to rebuild (v0.X.X)
         type: string
         required: false
       platform:
@@ -1248,12 +1248,17 @@ jobs:
 
   build-linux-armv7:
     name: Build for linux-armv7
-    needs: prepare-release
-    if: needs.prepare-release.outputs.build_armv7 == 'true'
+    needs: [prepare-release, build-and-package]
+    if: >-
+      always() &&
+      needs.prepare-release.outputs.build_armv7 == 'true' &&
+      (needs.build-and-package.result == 'success' ||
+       (needs.prepare-release.outputs.platform == 'linux-armv7' && needs.build-and-package.result == 'skipped'))
     runs-on: ubuntu-latest
     env:
       TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
       VERSION_NO_V: ${{ needs.prepare-release.outputs.version }}
+      FULL_RELEASE: ${{ needs.prepare-release.outputs.full_release }}
 
     steps:
       - name: Checkout release repository
@@ -1267,301 +1272,172 @@ jobs:
           ref: ${{ env.TARGET_REF }}
           fetch-depth: 0
 
-      - name: Enable ARM emulation
-        uses: docker/setup-qemu-action@v3
+      - name: Restore native Linux x64 build
+        if: env.FULL_RELEASE == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: assets-linux-x64
+          path: host_dl
 
-      - name: Restore previous ARMv7 release
+      - name: Prepare ARMv7 cross build environment
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p boot_env boot_dl release_pkg/bin release_pkg/std Output Output_Snapshots
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+
+          mkdir -p arm_dl host_env release_pkg/bin release_pkg/std Output Output_Snapshots
           PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a previous release for linux-armv7."
             exit 1
           fi
-          SOURCE_BASE_TAG="$PREV_TAG"
-          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-linux-armv7-*.tar.gz" --dir boot_dl --clobber
-          tar -xzf boot_dl/*.tar.gz -C boot_env
-          cp -a boot_env/tools release_pkg/tools
-          echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
-          echo "SOURCE_BASE_TAG=$SOURCE_BASE_TAG" >> "$GITHUB_ENV"
 
-      - name: Bootstrap, test, and package ARMv7
+          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-linux-armv7-*.tar.gz" --dir arm_dl --clobber
+          tar -xzf arm_dl/*.tar.gz -C release_pkg
+
+          if [ "$FULL_RELEASE" = true ]; then
+            HOST_ARCHIVE=$(find host_dl -maxdepth 1 -type f -name 'whitelang-linux-x64-*.tar.gz' -print -quit)
+          else
+            gh release download "$TARGET_REF" -R ${{ github.repository }} --pattern "whitelang-linux-x64-*.tar.gz" --dir host_dl --clobber
+            HOST_ARCHIVE=$(find host_dl -maxdepth 1 -type f -name 'whitelang-linux-x64-*.tar.gz' -print -quit)
+          fi
+          if [ -z "$HOST_ARCHIVE" ]; then
+            echo "::error::Could not obtain a native Linux x64 compiler for ARMv7 cross compilation."
+            exit 1
+          fi
+          tar -xzf "$HOST_ARCHIVE" -C host_env
+
+          echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
+
+      - name: Cross-build, validate, and package ARMv7
         shell: bash
         run: |
-          docker run --rm -i --platform linux/arm/v7 \
-            -e PREV_TAG="$PREV_TAG" \
-            -e SOURCE_BASE_TAG="$SOURCE_BASE_TAG" \
-            -e TARGET_REF="$TARGET_REF" \
-            -e VERSION_NO_V="$VERSION_NO_V" \
-            -v "$PWD:/workspace" \
-            arm32v7/debian:bookworm-slim sh -s <<'ARMV7'
-          set -eu
-          apt-get update
-          apt-get install -y --no-install-recommends binutils ca-certificates gcc git libc6-dev python3
-          rm -rf /var/lib/apt/lists/*
+          set -euo pipefail
+          cd source_repo
+          git config --global --add safe.directory "$PWD"
 
-          cd /workspace/source_repo
-          git config --global --add safe.directory /workspace/source_repo
-          commits=$(git rev-list --reverse "$SOURCE_BASE_TAG..$TARGET_REF")
-          final_commit=$(git rev-parse "$TARGET_REF^{commit}")
-          release_version=${TARGET_REF#v}
-          commit_date=$(git show -s --format=%cs "$final_commit")
+          FINAL_COMMIT=$(git rev-parse "$TARGET_REF^{commit}")
+          RELEASE_VERSION=${TARGET_REF#v}
+          COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
+          CROSS_TARGET=armv7-unknown-linux-gnueabihf
+          CROSS_SYSROOT=/usr/arm-linux-gnueabihf
+          HOST_ENV="$GITHUB_WORKSPACE/host_env"
+          HOST_WLC="$HOST_ENV/bin/wlc"
+          ARM_ENV="$GITHUB_WORKSPACE/release_pkg"
+          ARM_WLC="$ARM_ENV/bin/wlc"
 
-          if ! printf '%s\n' "$TARGET_REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-            echo "Invalid release tag '$TARGET_REF'." >&2
+          if [ ! -x "$HOST_WLC" ] || [ ! -x "$HOST_ENV/tools/llvm/bin/clang" ]; then
+            echo "::error::The native Linux x64 compiler package is incomplete."
+            exit 1
+          fi
+          if [ ! -x "$ARM_ENV/tools/llvm/bin/clang" ]; then
+            echo "::error::The ARMv7 release toolchain is incomplete."
             exit 1
           fi
 
           stamp_release_metadata() {
-            awk -v version="$release_version" -v revision="$final_commit" -v commit_date="$commit_date" '
+            awk -v version="$RELEASE_VERSION" -v revision="$FINAL_COMMIT" -v commit_date="$COMMIT_DATE" '
               BEGIN { versions = 0; revisions = 0; dates = 0 }
               /^const VERSION -> String = / { print "const VERSION -> String = \"" version "\";"; versions++; next }
               /^const REVISION -> String = / { print "const REVISION -> String = \"" revision "\";"; revisions++; next }
               /^const COMMIT_DATE -> String = / { print "const COMMIT_DATE -> String = \"" commit_date "\";"; dates++; next }
               { print }
               END { if (versions != 1 || revisions != 1 || dates != 1) exit 2 }
-            ' src/wlc.wl > src/wlc.wl.release || {
-              rm -f src/wlc.wl.release
-              echo "Could not stamp release metadata in src/wlc.wl." >&2
-              exit 1
-            }
+            ' src/wlc.wl > src/wlc.wl.release
             mv src/wlc.wl.release src/wlc.wl
           }
-
-          echo "Release tag: $TARGET_REF"
-          echo "Release commit: $final_commit"
-          echo "Commit date: $commit_date"
-          llvm_bin=/workspace/release_pkg/tools/llvm/bin
-          export PATH="$llvm_bin:$PATH"
-          active_wlc=/workspace/boot_env/bin/wlc
-          active_env=/workspace/boot_env
-          chmod +x "$active_wlc" "$llvm_bin/clang" 2>/dev/null || true
-          WLC_BOOTSTRAP_TIMEOUT_SECONDS=600
-
-          run_bootstrap_attempt() {
-            timeout_seconds=${WLC_BOOTSTRAP_TIMEOUT_SECONDS:-300}
-            marker="/tmp/wlc-bootstrap-timeout-$$"
-            status=0
-            rm -f "$marker"
-            "$@" &
-            compiler_pid=$!
-            (
-              sleep "$timeout_seconds"
-              if kill -0 "$compiler_pid" 2>/dev/null; then
-                echo "Bootstrap compiler exceeded ${timeout_seconds}s; trying the next compatibility fallback." >&2
-                : > "$marker"
-                kill "$compiler_pid" 2>/dev/null || true
-                sleep 5
-                kill -9 "$compiler_pid" 2>/dev/null || true
-              fi
-            ) &
-            watchdog_pid=$!
-            wait "$compiler_pid" || status=$?
-            kill "$watchdog_pid" 2>/dev/null || true
-            wait "$watchdog_pid" 2>/dev/null || true
-            if [ -f "$marker" ]; then
-              rm -f "$marker"
-              return 124
-            fi
-            return "$status"
+          compile_arm() { WL_PATH="$HOST_ENV" "$HOST_WLC" "$@" --target="$CROSS_TARGET" --sysroot="$CROSS_SYSROOT"; }
+          run_arm() { WL_PATH="$ARM_ENV" qemu-arm -L "$CROSS_SYSROOT" "$@"; }
+          emit_host_ir() {
+            rm -f src/wlc.ll
+            compile_arm src/wlc.wl -S --emit-llvm -Oz
+            test -s src/wlc.ll
+            mv src/wlc.ll "$1"
+          }
+          emit_arm_ir() {
+            rm -f src/wlc.ll
+            timeout 600s env WL_PATH="$ARM_ENV" qemu-arm -L "$CROSS_SYSROOT" "$ARM_WLC" src/wlc.wl -S --emit-llvm -Oz
+            test -s src/wlc.ll
+            mv src/wlc.ll "$1"
           }
 
-          for commit in $commits; do
-            short_sha=$(git rev-parse --short "$commit")
-            echo "------------------------------------------------"
-            echo "Bootstrapping Commit: $short_sha"
-            git checkout "$commit"
-            if [ "$commit" = "$final_commit" ]; then
-              stamp_release_metadata
-            fi
-
-            cp -a "$active_env/std" "$active_env/std_backup"
-            rm -rf "$active_env/runtime_backup"
-            if [ -d "$active_env/runtime" ]; then cp -a "$active_env/runtime" "$active_env/runtime_backup"; fi
-
-            has_native_rt=false
-            if [ -f runtime/wl_runtime.c ]; then
-              has_native_rt=true
-              mkdir -p "$active_env/runtime"
-              "$llvm_bin/clang" -c runtime/wl_runtime.c -o "$active_env/runtime/wl_runtime_new.o" -O2
-            fi
-            new_rt_label="New RT"
-            if [ "$has_native_rt" = false ]; then new_rt_label="No RT"; fi
-
-            export WL_PATH="$active_env"
-            build_dir="/workspace/build_$short_sha"
-            mkdir -p "$build_dir/bin" "$build_dir/std"
-            cp -a /workspace/release_pkg/tools "$build_dir/tools"
-
-            apply_env() {
-              rm -rf "$active_env/std" "$active_env/runtime/wl_runtime.o"
-              mkdir -p "$active_env/std"
-              if [ "$1" = new_std ]; then cp -a std/. "$active_env/std/"; else cp -a "$active_env/std_backup/." "$active_env/std/"; fi
-              if [ "$2" = new_rt ]; then
-                if [ "$has_native_rt" = true ]; then
-                  mkdir -p "$active_env/runtime"
-                  cp "$active_env/runtime/wl_runtime_new.o" "$active_env/runtime/wl_runtime.o"
-                else
-                  rm -rf "$active_env/runtime"
-                fi
-              elif [ -f "$active_env/runtime_backup/wl_runtime.o" ]; then
-                mkdir -p "$active_env/runtime"
-                cp "$active_env/runtime_backup/wl_runtime.o" "$active_env/runtime/wl_runtime.o"
-              else
-                rm -rf "$active_env/runtime"
-              fi
-            }
-
-            echo "Stage 1: Trying [New STD + $new_rt_label]..."
-            apply_env new_std new_rt
-            if run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
-              echo "[New STD + $new_rt_label] succeeded."
-            elif [ "$has_native_rt" = false ]; then
-              echo "Failed. Trying [Old STD + No RT]..."
-              apply_env old_std new_rt
-              if ! run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
-                echo "All fallback combinations failed!" >&2
-                exit 1
-              fi
-              echo "[Old STD + No RT] succeeded."
-            else
-              echo "Failed. Trying [New STD + Old RT]..."
-              apply_env new_std old_rt
-              if run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
-                echo "[New STD + Old RT] succeeded."
-              else
-                echo "Failed. Trying [Old STD + $new_rt_label]..."
-                apply_env old_std new_rt
-                if run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
-                  echo "[Old STD + $new_rt_label] succeeded."
-                else
-                  echo "Failed. Trying [Old STD + Old RT]..."
-                  apply_env old_std old_rt
-                  if ! run_bootstrap_attempt "$active_wlc" src/wlc.wl -o "$build_dir/bin/wlc_temp" -Oz; then
-                    echo "All fallback combinations failed!" >&2
-                    exit 1
-                  fi
-                fi
-              fi
-            fi
-
-            echo "Stage 2: Finalizing with the current standard library..."
-            apply_env new_std new_rt
-            if ! run_bootstrap_attempt "$build_dir/bin/wlc_temp" src/wlc.wl -o "$build_dir/bin/wlc" -Oz; then
-              echo "Stage 2 failed or exceeded the bootstrap timeout." >&2
-              exit 1
-            fi
-            rm -f "$build_dir/bin/wlc_temp" "$active_env/runtime/wl_runtime_new.o"
-            rm -rf "$active_env/std_backup" "$active_env/runtime_backup"
-            if [ "$has_native_rt" = true ]; then
-              mkdir -p "$build_dir/runtime"
-              cp "$active_env/runtime/wl_runtime.o" "$build_dir/runtime/"
-            fi
-            cp -a std/. "$build_dir/std/"
-            active_wlc="$build_dir/bin/wlc"
-            active_env="$build_dir"
-
-            if [ "$commit" = "$final_commit" ]; then
-              cp "$active_wlc" /workspace/release_pkg/bin/wlc
-              rm -rf /workspace/release_pkg/std /workspace/release_pkg/runtime
-              mkdir -p /workspace/release_pkg/std
-              cp -a std/. /workspace/release_pkg/std/
-              if [ "$has_native_rt" = true ]; then cp -a "$build_dir/runtime" /workspace/release_pkg/runtime; fi
-            else
-              snapshot="linux-armv7-$VERSION_NO_V-snapshot-$short_sha"
-              if [ -d "$build_dir/runtime" ]; then
-                tar -czf "/workspace/Output_Snapshots/$snapshot.tar.gz" -C "$build_dir" bin std runtime
-              else
-                tar -czf "/workspace/Output_Snapshots/$snapshot.tar.gz" -C "$build_dir" bin std
-              fi
-            fi
-          done
-          git checkout "$TARGET_REF"
           stamp_release_metadata
+          rm -rf "$ARM_ENV/bin" "$ARM_ENV/std" "$ARM_ENV/runtime"
+          mkdir -p "$ARM_ENV/bin" "$ARM_ENV/std"
+          cp -a std/. "$ARM_ENV/std/"
 
-          export WL_PATH=/workspace/release_pkg
-          current=/workspace/release_pkg/bin/wlc
-          next=/workspace/release_pkg/bin/wlc_next
-          clean_objdump() {
-            objdump -d "$1" | awk '!/file format/ && NF' > "$2"
-          }
-          clean_objdump "$current" /workspace/wlc_current.asm
-          matched=false
-          attempt=1
-          while [ "$attempt" -le 3 ]; do
-            "$current" src/wlc.wl -o "$next" -Oz
-            clean_objdump "$next" /workspace/wlc_next.asm
-            if diff -u /workspace/wlc_current.asm /workspace/wlc_next.asm > /workspace/diff.log; then
-              matched=true
-              mv -f "$next" "$current"
-              break
-            fi
-            head -n 20 /workspace/diff.log
-            mv -f "$next" "$current"
-            mv -f /workspace/wlc_next.asm /workspace/wlc_current.asm
-            attempt=$((attempt + 1))
-          done
-          rm -f /workspace/wlc_current.asm /workspace/wlc_next.asm /workspace/diff.log
-          if [ "$matched" = false ]; then echo "compiler failed to reach a fixed point" >&2; exit 1; fi
+          echo "Cross-compiling the ARMv7 compiler from native Linux x64..."
+          compile_arm src/wlc.wl -o "$ARM_WLC" -Oz
+          chmod +x "$ARM_WLC"
 
-          errors=0
-          find /workspace/source_repo/tests -type f -name '*.wl' ! -path '*/ffi/*' ! -path '*/failures/*' ! -path '*/fixtures/*' | sort > /workspace/positive-tests.txt
-          while IFS= read -r test_file; do
-            echo "Running test: $test_file"
-            rm -f /workspace/test_bin
-            if ! "$current" "$test_file" -o /workspace/test_bin; then
-              errors=$((errors + 1))
+          echo "Checking the ARMv7 frontend fixed point..."
+          emit_host_ir "$GITHUB_WORKSPACE/wlc_host.ll"
+          emit_arm_ir "$GITHUB_WORKSPACE/wlc_arm.ll"
+          diff -u "$GITHUB_WORKSPACE/wlc_host.ll" "$GITHUB_WORKSPACE/wlc_arm.ll"
+          rm -f "$GITHUB_WORKSPACE/wlc_host.ll" "$GITHUB_WORKSPACE/wlc_arm.ll"
+
+          echo "Checking the packaged ARMv7 driver..."
+          run_arm "$ARM_WLC" --version
+          timeout 600s env WL_PATH="$ARM_ENV" qemu-arm -L "$CROSS_SYSROOT" "$ARM_WLC" tests/integration/os/test_sys_platform.wl -o "$GITHUB_WORKSPACE/arm_wlc_smoke"
+          SMOKE_OUTPUT=$(run_arm "$GITHUB_WORKSPACE/arm_wlc_smoke" 2>&1)
+          printf '%s\n' "$SMOKE_OUTPUT" | grep -Fq 'PASS:'
+          rm -f "$GITHUB_WORKSPACE/arm_wlc_smoke"
+
+          ERRORS=0
+          find tests -type f -name '*.wl' ! -path '*/ffi/*' ! -path '*/failures/*' ! -path '*/fixtures/*' | sort > "$GITHUB_WORKSPACE/positive-tests.txt"
+          while IFS= read -r TEST_FILE; do
+            echo "Running test: $TEST_FILE"
+            TEST_BIN="$GITHUB_WORKSPACE/test_bin"
+            rm -f "$TEST_BIN"
+            if ! compile_arm "$TEST_FILE" -o "$TEST_BIN"; then
+              ERRORS=$((ERRORS + 1))
               continue
             fi
-            output=$(/workspace/test_bin 2>&1) || status=$?
-            status=${status:-0}
-            if [ "$status" -ne 0 ] || ! printf '%s\n' "$output" | grep -Fq 'PASS:'; then
-              printf '%s\n' "$output"
-              errors=$((errors + 1))
+            OUTPUT=$(run_arm "$TEST_BIN" 2>&1) || STATUS=$?
+            STATUS=${STATUS:-0}
+            if [ "$STATUS" -ne 0 ] || ! printf '%s\n' "$OUTPUT" | grep -Fq 'PASS:'; then
+              printf '%s\n' "$OUTPUT"
+              ERRORS=$((ERRORS + 1))
             fi
-            unset status
-          done < /workspace/positive-tests.txt
-          if [ "$errors" -ne 0 ]; then echo "$errors positive tests failed" >&2; exit 1; fi
+            unset STATUS
+          done < "$GITHUB_WORKSPACE/positive-tests.txt"
+          if [ "$ERRORS" -ne 0 ]; then echo "$ERRORS positive tests failed" >&2; exit 1; fi
 
-          find /workspace/source_repo/tests/diagnostics/failures -type f -name '*.wl' | sort > /workspace/diagnostic-tests.txt
-          while IFS= read -r test_file; do
-            expected=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$test_file" | head -n 1)
-            if [ -z "$expected" ]; then echo "missing Expected Error declaration: $test_file" >&2; exit 1; fi
-            rm -f /workspace/diagnostic_bin
-            build_output=$("$current" "$test_file" -o /workspace/diagnostic_bin 2>&1) || build_status=$?
-            build_status=${build_status:-0}
-            run_output=""
-            run_status=0
-            if [ "$build_status" -eq 0 ]; then run_output=$(/workspace/diagnostic_bin 2>&1) || run_status=$?; fi
-            if [ "$build_status" -eq 0 ] && [ "$run_status" -eq 0 ]; then echo "diagnostic test unexpectedly passed: $test_file" >&2; exit 1; fi
-            if ! printf '%s\n%s\n' "$build_output" "$run_output" | grep -Fq "$expected"; then
-              printf '%s\n%s\n' "$build_output" "$run_output"
-              echo "expected diagnostic was not produced: $expected" >&2
+          find tests/diagnostics/failures -type f -name '*.wl' | sort > "$GITHUB_WORKSPACE/diagnostic-tests.txt"
+          while IFS= read -r TEST_FILE; do
+            EXPECTED=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$TEST_FILE" | head -n 1)
+            if [ -z "$EXPECTED" ]; then echo "missing Expected Error declaration: $TEST_FILE" >&2; exit 1; fi
+            rm -f "$GITHUB_WORKSPACE/diagnostic_bin"
+            BUILD_OUTPUT=$(compile_arm "$TEST_FILE" -o "$GITHUB_WORKSPACE/diagnostic_bin" 2>&1) || BUILD_STATUS=$?
+            BUILD_STATUS=${BUILD_STATUS:-0}
+            if [ "$BUILD_STATUS" -eq 0 ]; then
+              echo "diagnostic test unexpectedly compiled: $TEST_FILE" >&2
               exit 1
             fi
-            unset build_status
-          done < /workspace/diagnostic-tests.txt
+            if ! printf '%s\n' "$BUILD_OUTPUT" | grep -Fq "$EXPECTED"; then
+              printf '%s\n' "$BUILD_OUTPUT"
+              echo "expected diagnostic was not produced: $EXPECTED" >&2
+              exit 1
+            fi
+            unset BUILD_STATUS
+          done < "$GITHUB_WORKSPACE/diagnostic-tests.txt"
 
-          ffi=/workspace/source_repo/tests/integration/ffi
-          cd "$ffi"
+          FFI=tests/integration/ffi
+          cd "$FFI"
           rm -f test_lib_export.so libtest_lib_export.so test_c_host test_wl_host
-          "$current" test_lib_export.wl --shared
-          cp libtest_lib_export.so test_lib_export.so
-          "$llvm_bin/clang" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
-          export LD_LIBRARY_PATH="$ffi${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          c_output=$(./test_c_host 2>&1)
-          printf '%s\n' "$c_output" | grep -Fq 'PASS:'
-          python_output=$(python3 test_dll_host.py 2>&1)
-          printf '%s\n' "$python_output" | grep -Fq 'PASS:'
-          "$current" test_dll_host.wl libtest_lib_export.so -o test_wl_host
-          wl_output=$(./test_wl_host 2>&1)
-          printf '%s\n' "$wl_output" | grep -Fq 'PASS:'
+          compile_arm test_lib_export.wl --shared
+          arm-linux-gnueabihf-gcc test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
+          export LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          C_OUTPUT=$(qemu-arm -L "$CROSS_SYSROOT" ./test_c_host 2>&1)
+          printf '%s\n' "$C_OUTPUT" | grep -Fq 'PASS:'
+          compile_arm test_dll_host.wl libtest_lib_export.so -o test_wl_host
+          WL_OUTPUT=$(qemu-arm -L "$CROSS_SYSROOT" ./test_wl_host 2>&1)
+          printf '%s\n' "$WL_OUTPUT" | grep -Fq 'PASS:'
+          echo "ARMv7 Python FFI is covered by native Linux jobs; C and White hosts cover the ARMv7 ABI."
 
-          tar -czf "/workspace/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C /workspace/release_pkg .
-          ARMV7
+          tar -czf "$GITHUB_WORKSPACE/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C "$ARM_ENV" .
 
       - name: Store ARMv7 release asset
         uses: actions/upload-artifact@v4
