@@ -371,9 +371,9 @@ jobs:
           stamp_release_metadata() {
             awk -v version="$VERSION_NO_V" -v revision="$FINAL_COMMIT" -v commit_date="$COMMIT_DATE" '
               BEGIN { versions = 0; revisions = 0; dates = 0 }
-              /^const VERSION -> String = / { print "const VERSION -> String = \"" version "\";"; versions++; next }
-              /^const REVISION -> String = / { print "const REVISION -> String = \"" revision "\";"; revisions++; next }
-              /^const COMMIT_DATE -> String = / { print "const COMMIT_DATE -> String = \"" commit_date "\";"; dates++; next }
+              /^[[:space:]]*const[[:space:]]+VERSION[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" version "\";"); print; versions++; next }
+              /^[[:space:]]*const[[:space:]]+REVISION[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" revision "\";"); print; revisions++; next }
+              /^[[:space:]]*const[[:space:]]+COMMIT_DATE[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" commit_date "\";"); print; dates++; next }
               { print }
               END { if (versions != 1 || revisions != 1 || dates != 1) exit 2 }
             ' src/wlc.wl > src/wlc.wl.release || {
@@ -655,9 +655,9 @@ jobs:
           stamp_release_metadata() {
             awk -v version="$VERSION_NO_V" -v revision="$FINAL_COMMIT" -v commit_date="$COMMIT_DATE" '
               BEGIN { versions = 0; revisions = 0; dates = 0 }
-              /^const VERSION -> String = / { print "const VERSION -> String = \"" version "\";"; versions++; next }
-              /^const REVISION -> String = / { print "const REVISION -> String = \"" revision "\";"; revisions++; next }
-              /^const COMMIT_DATE -> String = / { print "const COMMIT_DATE -> String = \"" commit_date "\";"; dates++; next }
+              /^[[:space:]]*const[[:space:]]+VERSION[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" version "\";"); print; versions++; next }
+              /^[[:space:]]*const[[:space:]]+REVISION[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" revision "\";"); print; revisions++; next }
+              /^[[:space:]]*const[[:space:]]+COMMIT_DATE[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" commit_date "\";"); print; dates++; next }
               { print }
               END { if (versions != 1 || revisions != 1 || dates != 1) exit 2 }
             ' src/wlc.wl > src/wlc.wl.release || {
@@ -1357,12 +1357,16 @@ jobs:
           stamp_release_metadata() {
             awk -v version="$RELEASE_VERSION" -v revision="$FINAL_COMMIT" -v commit_date="$COMMIT_DATE" '
               BEGIN { versions = 0; revisions = 0; dates = 0 }
-              /^const VERSION -> String = / { print "const VERSION -> String = \"" version "\";"; versions++; next }
-              /^const REVISION -> String = / { print "const REVISION -> String = \"" revision "\";"; revisions++; next }
-              /^const COMMIT_DATE -> String = / { print "const COMMIT_DATE -> String = \"" commit_date "\";"; dates++; next }
+              /^[[:space:]]*const[[:space:]]+VERSION[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" version "\";"); print; versions++; next }
+              /^[[:space:]]*const[[:space:]]+REVISION[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" revision "\";"); print; revisions++; next }
+              /^[[:space:]]*const[[:space:]]+COMMIT_DATE[[:space:]]*(->|:)[[:space:]]*String[[:space:]]*=/ { sub(/=.*/, "= \"" commit_date "\";"); print; dates++; next }
               { print }
               END { if (versions != 1 || revisions != 1 || dates != 1) exit 2 }
-            ' src/wlc.wl > src/wlc.wl.release
+            ' src/wlc.wl > src/wlc.wl.release || {
+              rm -f src/wlc.wl.release
+              echo "::error::Could not stamp release metadata in src/wlc.wl."
+              exit 1
+            }
             mv src/wlc.wl.release src/wlc.wl
           }
           compile_arm() { WL_PATH="$HOST_ENV" "$HOST_WLC" "$@" --target="$CROSS_TARGET"; }
