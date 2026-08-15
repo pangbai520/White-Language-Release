@@ -1309,6 +1309,17 @@ jobs:
           fi
           tar -xzf "$HOST_ARCHIVE" -C host_env
 
+          # The portable clang otherwise falls back to the runner's x86-only GNU ld.
+          # Keep the target-specific settings beside clang so every WLC invocation
+          # uses the packaged LLD and the installed ARM GCC runtime.
+          HOST_LLVM="$PWD/host_env/tools/llvm/bin"
+          if [ ! -x "$HOST_LLVM/ld.lld" ]; then
+            echo "::error::The native Linux x64 package does not contain ld.lld."
+            exit 1
+          fi
+          printf '%s\n' '-fuse-ld=lld' '--gcc-toolchain=/usr' > "$HOST_LLVM/armv7-unknown-linux-gnueabihf.cfg"
+          cp "$HOST_LLVM/armv7-unknown-linux-gnueabihf.cfg" "$HOST_LLVM/armv7-unknown-linux-gnueabihf-clang.cfg"
+
           echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
 
       - name: Cross-build, validate, and package ARMv7
