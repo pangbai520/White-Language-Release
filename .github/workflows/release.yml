@@ -16,7 +16,11 @@ on:
           - sync-r2
         default: repair
       release_tag:
-        description: Existing release tag to rebuild (v0.X.X)
+        description: Release tag to repair (v0.X.X)
+        type: string
+        required: false
+      source_run_id:
+        description: Failed release run ID to recover artifacts from (optional)
         type: string
         required: false
       platform:
@@ -34,6 +38,7 @@ on:
         default: macos-x64
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -74,7 +79,7 @@ jobs:
               exit 1
             fi
             if [ "$platform" = linux-armv7 ]; then
-              matrix='[]'
+              matrix=$(printf '%s' "$all_targets" | jq -c '[.[] | select(.os_name == "linux-x64")]')
               build_armv7=true
             else
               matrix=$(printf '%s' "$all_targets" | jq -c --arg platform "$platform" '[.[] | select(.os_name == $platform)]')
@@ -1252,8 +1257,7 @@ jobs:
     if: >-
       always() &&
       needs.prepare-release.outputs.build_armv7 == 'true' &&
-      (needs.build-and-package.result == 'success' ||
-       (needs.prepare-release.outputs.platform == 'linux-armv7' && needs.build-and-package.result == 'skipped'))
+      (needs.build-and-package.result == 'success' || needs.build-and-package.result == 'failure')
     runs-on: ubuntu-latest
     env:
       TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
@@ -1273,7 +1277,6 @@ jobs:
           fetch-depth: 0
 
       - name: Restore native Linux x64 build
-        if: env.FULL_RELEASE == 'true'
         uses: actions/download-artifact@v4
         with:
           name: assets-linux-x64
@@ -1297,21 +1300,14 @@ jobs:
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-linux-armv7-*.tar.gz" --dir arm_dl --clobber
           tar -xzf arm_dl/*.tar.gz -C release_pkg
 
-          if [ "$FULL_RELEASE" = true ]; then
-            HOST_ARCHIVE=$(find host_dl -maxdepth 1 -type f -name 'whitelang-linux-x64-*.tar.gz' -print -quit)
-          else
-            gh release download "$TARGET_REF" -R ${{ github.repository }} --pattern "whitelang-linux-x64-*.tar.gz" --dir host_dl --clobber
-            HOST_ARCHIVE=$(find host_dl -maxdepth 1 -type f -name 'whitelang-linux-x64-*.tar.gz' -print -quit)
-          fi
+          HOST_ARCHIVE=$(find host_dl -maxdepth 1 -type f -name 'whitelang-linux-x64-*.tar.gz' -print -quit)
           if [ -z "$HOST_ARCHIVE" ]; then
             echo "::error::Could not obtain a native Linux x64 compiler for ARMv7 cross compilation."
             exit 1
           fi
           tar -xzf "$HOST_ARCHIVE" -C host_env
 
-          # The portable clang otherwise falls back to the runner's x86-only GNU ld.
-          # Keep the target-specific settings beside clang so every WLC invocation
-          # uses the packaged LLD and the installed ARM GCC runtime.
+          # keep cross links on packaged LLD instead of the runner's x86 GNU ld
           HOST_LLVM="$PWD/host_env/tools/llvm/bin"
           if [ ! -x "$HOST_LLVM/ld.lld" ]; then
             echo "::error::The native Linux x64 package does not contain ld.lld."
@@ -1466,56 +1462,183 @@ jobs:
           retention-days: 7
 
   publish-release:
-    name: Publish release assets
+    name: Stage and publish release assets
     needs: [prepare-release, build-and-package, build-linux-armv7]
-    if: >-
-      always() &&
-      needs.prepare-release.outputs.publish == 'true' &&
-      ((needs.prepare-release.outputs.platform == 'all' && needs.build-and-package.result == 'success' && needs.build-linux-armv7.result == 'success') ||
-       (needs.prepare-release.outputs.platform == 'linux-armv7' && needs.build-linux-armv7.result == 'success') ||
-       (needs.prepare-release.outputs.platform != 'all' && needs.prepare-release.outputs.platform != 'linux-armv7' && needs.build-and-package.result == 'success'))
+    if: always() && needs.prepare-release.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      complete: ${{ steps.verify.outputs.complete }}
     steps:
-      - name: Download release assets
+      - name: Locate the original release run
+        id: source-run
+        if: needs.prepare-release.outputs.full_release != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_RUN_ID: ${{ inputs.source_run_id }}
+          TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          if [ -n "$REQUESTED_RUN_ID" ]; then
+            if ! printf '%s\n' "$REQUESTED_RUN_ID" | grep -Eq '^[0-9]+$'; then
+              echo "::error::source_run_id must be a numeric workflow run ID."
+              exit 1
+            fi
+            RUN_ID="$REQUESTED_RUN_ID"
+          else
+            TARGET_SHA=$(gh api "repos/${{ github.repository }}/commits/$TARGET_REF" --jq '.sha')
+            RUN_ID=$(gh run list -R ${{ github.repository }} --workflow "${{ github.workflow }}" --commit "$TARGET_SHA" --limit 20 --json databaseId --jq '.[0].databaseId')
+          fi
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No earlier release run was found for $TARGET_REF."
+            exit 0
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Recover assets from the previous run
+        if: steps.source-run.outputs.run_id != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ steps.source-run.outputs.run_id }}
+        run: |
+          mkdir -p recovered_assets all_assets
+          echo "Recovering successful assets from workflow run $RUN_ID..."
+          if ! gh run download "$RUN_ID" -R ${{ github.repository }} --pattern 'assets-*' --dir recovered_assets; then
+            echo "No unexpired release artifacts were available in run $RUN_ID."
+            exit 0
+          fi
+          find recovered_assets -type f -exec cp -f {} all_assets/ \;
+
+      - name: Download assets built in this run
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          path: all_assets
+          path: current_assets
           pattern: assets-*
           merge-multiple: true
 
-      - name: Download bootstrap snapshots
+      - name: Merge current release assets
+        shell: bash
+        run: |
+          mkdir -p all_assets
+          if [ -d current_assets ]; then
+            find current_assets -maxdepth 1 -type f -exec cp -f {} all_assets/ \;
+          fi
+
+      - name: Recover snapshots from the previous run
+        if: steps.source-run.outputs.run_id != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ steps.source-run.outputs.run_id }}
+        run: |
+          mkdir -p recovered_snapshots all_snapshots
+          if ! gh run download "$RUN_ID" -R ${{ github.repository }} --pattern 'snapshots-*' --dir recovered_snapshots; then exit 0; fi
+          find recovered_snapshots -type f -exec cp -f {} all_snapshots/ \;
+
+      - name: Download snapshots built in this run
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          path: all_snapshots
+          path: current_snapshots
           pattern: snapshots-*
           merge-multiple: true
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare-release.outputs.release_tag }}
-          files: all_assets/*
+      - name: Stage successful release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          shopt -s nullglob
+          assets=(all_assets/*)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "::warning::No successful release assets were produced or recovered."
+            exit 0
+          fi
 
-      - name: Publish bootstrap snapshots
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare-release.outputs.release_tag }}-snapshots
-          name: snapshots-${{ needs.prepare-release.outputs.release_tag }}
-          prerelease: true
-          files: all_snapshots/*
+          if ! gh release view "$TARGET_REF" -R ${{ github.repository }} >/dev/null 2>&1; then
+            gh release create "$TARGET_REF" -R ${{ github.repository }} --draft --title "White Language ${TARGET_REF#v}"
+          fi
+          gh release upload "$TARGET_REF" -R ${{ github.repository }} "${assets[@]}" --clobber
+
+      - name: Stage bootstrap snapshots
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          mkdir -p all_snapshots
+          if [ -d current_snapshots ]; then
+            find current_snapshots -maxdepth 1 -type f -exec cp -f {} all_snapshots/ \;
+          fi
+          shopt -s nullglob
+          snapshots=(all_snapshots/*)
+          if [ ${#snapshots[@]} -eq 0 ]; then exit 0; fi
+
+          SNAPSHOT_TAG="${TARGET_REF}-snapshots"
+          if ! gh release view "$SNAPSHOT_TAG" -R ${{ github.repository }} >/dev/null 2>&1; then
+            gh release create "$SNAPSHOT_TAG" -R ${{ github.repository }} --prerelease --title "snapshots-${TARGET_REF}"
+          fi
+          gh release upload "$SNAPSHOT_TAG" -R ${{ github.repository }} "${snapshots[@]}" --clobber
+
+      - name: Verify and publish the complete release
+        id: verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
+          VERSION_NO_V: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          if ! gh release view "$TARGET_REF" -R ${{ github.repository }} >/dev/null 2>&1; then
+            echo "::error::The release has no staged assets. Repair a failed platform and run again."
+            exit 1
+          fi
+
+          gh release view "$TARGET_REF" -R ${{ github.repository }} --json assets --jq '.assets[].name' > release-assets.txt
+          expected=(
+            "WhiteLanguage-Windows-x64-Setup-${VERSION_NO_V}.exe"
+            "WhiteLanguage-Windows-x64-Portable-${VERSION_NO_V}.zip"
+            "WhiteLanguage-Windows-x32-Setup-${VERSION_NO_V}.exe"
+            "WhiteLanguage-Windows-x32-Portable-${VERSION_NO_V}.zip"
+            "whitelang-macos-arm64-${VERSION_NO_V}.tar.gz"
+            "whitelang-macos-x64-${VERSION_NO_V}.tar.gz"
+            "whitelang-linux-x64-${VERSION_NO_V}.tar.gz"
+            "whitelang-linux-x86-${VERSION_NO_V}.tar.gz"
+            "whitelang-linux-arm64-${VERSION_NO_V}.tar.gz"
+            "whitelang-linux-armv7-${VERSION_NO_V}.tar.gz"
+          )
+
+          missing=0
+          for asset in "${expected[@]}"; do
+            if ! grep -Fxq "$asset" release-assets.txt; then
+              echo "::notice::Missing release asset: $asset"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::The draft has $missing missing asset(s). Repair only those platforms and run again."
+            exit 1
+          fi
+
+          gh release edit "$TARGET_REF" -R ${{ github.repository }} --draft=false --latest
+          echo "complete=true" >> "$GITHUB_OUTPUT"
 
   promote-to-r2:
     name: Sync Assets to Cloudflare R2
     needs: [prepare-release, publish-release]
-    if: needs.prepare-release.outputs.full_release == 'true'
+    if: needs.publish-release.outputs.complete == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Download all platforms assets
-        uses: actions/download-artifact@v4
-        with:
-          path: all_assets
-          pattern: assets-*
-          merge-multiple: true
+      - name: Download the complete release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p all_assets
+          gh release download "${{ needs.prepare-release.outputs.release_tag }}" -R ${{ github.repository }} --dir all_assets
 
       - name: Sync to R2 Selective (Dots Logic)
         shell: bash
