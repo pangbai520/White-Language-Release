@@ -1415,7 +1415,7 @@ jobs:
           run_arm "$ARM_WLC" --version
           timeout 600s env WL_PATH="$ARM_ENV" qemu-arm -L "$QEMU_ROOT" "$ARM_WLC" tests/integration/os/test_sys_platform.wl -o "$GITHUB_WORKSPACE/arm_wlc_smoke"
           SMOKE_OUTPUT=$(run_arm "$GITHUB_WORKSPACE/arm_wlc_smoke" 2>&1)
-          printf '%s\n' "$SMOKE_OUTPUT" | grep -Fq 'PASS:'
+          grep -Fq 'PASS:' <<< "$SMOKE_OUTPUT"
           rm -f "$GITHUB_WORKSPACE/arm_wlc_smoke"
 
           ERRORS=0
@@ -1430,7 +1430,7 @@ jobs:
             fi
             OUTPUT=$(run_arm "$TEST_BIN" 2>&1) || STATUS=$?
             STATUS=${STATUS:-0}
-            if [ "$STATUS" -ne 0 ] || ! printf '%s\n' "$OUTPUT" | grep -Fq 'PASS:'; then
+            if [ "$STATUS" -ne 0 ] || ! grep -Fq 'PASS:' <<< "$OUTPUT"; then
               printf '%s\n' "$OUTPUT"
               ERRORS=$((ERRORS + 1))
             fi
@@ -1460,7 +1460,7 @@ jobs:
               echo "expected: $EXPECTED" >&2
               exit 1
             fi
-            if ! printf '%s\n' "$OUTPUT" | grep -Fq "$EXPECTED"; then
+            if ! grep -Fq "$EXPECTED" <<< "$OUTPUT"; then
               printf '%s\n' "$OUTPUT"
               echo "expected diagnostic was not produced: $EXPECTED" >&2
               exit 1
@@ -1475,10 +1475,10 @@ jobs:
           arm-linux-gnueabihf-gcc test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
           export LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           C_OUTPUT=$(qemu-arm -L "$QEMU_ROOT" ./test_c_host 2>&1)
-          printf '%s\n' "$C_OUTPUT" | grep -Fq 'PASS:'
+          grep -Fq 'PASS:' <<< "$C_OUTPUT"
           compile_arm test_dll_host.wl libtest_lib_export.so -o test_wl_host
           WL_OUTPUT=$(qemu-arm -L "$QEMU_ROOT" ./test_wl_host 2>&1)
-          printf '%s\n' "$WL_OUTPUT" | grep -Fq 'PASS:'
+          grep -Fq 'PASS:' <<< "$WL_OUTPUT"
           echo "ARMv7 Python FFI is covered by native Linux jobs; C and White hosts cover the ARMv7 ABI."
 
           tar -czf "$GITHUB_WORKSPACE/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C "$ARM_ENV" .
