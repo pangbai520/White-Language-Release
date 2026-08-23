@@ -505,13 +505,19 @@ jobs:
               fi
             fi
 
-            echo "Stage 2: Finalizing with latest STD and runtime state..."
             apply_env new_std new_rt
-            if ! run_bootstrap_attempt "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -Oz; then
-              echo "::error::Stage 2 failed or exceeded the bootstrap timeout."
-              exit 1
+            if [ -f .bootstrap-stage1-only ]; then
+              echo "Stage 2: Skipped for one-generation bootstrap bridge."
+              mv ../build_${SHORT_SHA}/bin/wlc_temp.exe ../build_${SHORT_SHA}/bin/wlc.exe
+            else
+              echo "Stage 2: Finalizing with latest STD and runtime state..."
+              if ! run_bootstrap_attempt "../build_${SHORT_SHA}/bin/wlc_temp.exe" src/wlc.wl $ICON_ARG -o ../build_${SHORT_SHA}/bin/wlc.exe -Oz; then
+                echo "::error::Stage 2 failed or exceeded the bootstrap timeout."
+                exit 1
+              fi
+              rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe
             fi
-            rm -f ../build_${SHORT_SHA}/bin/wlc_temp.exe "$ACTIVE_ENV/runtime/wl_runtime_new.obj"
+            rm -f "$ACTIVE_ENV/runtime/wl_runtime_new.obj"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
             if [ "$HAS_NATIVE_RT" = true ]; then
@@ -791,13 +797,19 @@ jobs:
               fi
             fi
 
-            echo "Stage 2: Finalizing with latest STD and runtime state..."
             apply_env new_std new_rt
-            if ! run_bootstrap_attempt "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -Oz; then
-              echo "::error::Stage 2 failed or exceeded the bootstrap timeout."
-              exit 1
+            if [ -f .bootstrap-stage1-only ]; then
+              echo "Stage 2: Skipped for one-generation bootstrap bridge."
+              mv ../build_${SHORT_SHA}/bin/wlc_temp ../build_${SHORT_SHA}/bin/wlc
+            else
+              echo "Stage 2: Finalizing with latest STD and runtime state..."
+              if ! run_bootstrap_attempt "../build_${SHORT_SHA}/bin/wlc_temp" src/wlc.wl -o ../build_${SHORT_SHA}/bin/wlc -Oz; then
+                echo "::error::Stage 2 failed or exceeded the bootstrap timeout."
+                exit 1
+              fi
+              rm -f ../build_${SHORT_SHA}/bin/wlc_temp
             fi
-            rm -f ../build_${SHORT_SHA}/bin/wlc_temp "$ACTIVE_ENV/runtime/wl_runtime_new.o"
+            rm -f "$ACTIVE_ENV/runtime/wl_runtime_new.o"
             rm -rf "$ACTIVE_ENV/std_backup" "$ACTIVE_ENV/runtime_backup"
 
             if [ "$HAS_NATIVE_RT" = true ]; then
