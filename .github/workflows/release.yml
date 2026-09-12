@@ -1015,6 +1015,7 @@ jobs:
         shell: bash
         run: |
           LLVM_BIN="release_pkg/tools/llvm/bin"
+          LLVM_ROOT="${LLVM_BIN%/bin}"
           export LD_LIBRARY_PATH="$PWD/release_pkg/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           if [ -d "$LLVM_BIN" ]; then
@@ -1024,7 +1025,7 @@ jobs:
             elif [ "${{ matrix.os_name }}" != "linux-x86" ]; then
               strip --strip-unneeded $LLVM_BIN/* 2>/dev/null || true
             fi
-            if [ "${{ matrix.os_name }}" = "linux-arm64" ] && [ ! -e "$PWD/$LLVM_BIN/libicui18n.so.70" ]; then
+            if [ "${{ matrix.os_name }}" = "linux-arm64" ] && [ ! -e "$PWD/$LLVM_ROOT/lib/libicui18n.so.70" ]; then
               echo "::error::The ARM64 LLVM package is missing libicui18n.so.70."
               exit 1
             fi
