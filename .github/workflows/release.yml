@@ -315,6 +315,31 @@ jobs:
           cp -a llvm_full/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_full/bin/llvm-objdump* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_full/lib/clang release_pkg/tools/llvm/lib/
+          # clang and lld from the official archives use the sibling LLVM/ICU shared libraries.
+          find llvm_full -type f -o -type l | while IFS= read -r library; do
+            case "$library" in
+              *.so|*.so.*|*.dylib|*.dylib.*) cp -a "$library" release_pkg/tools/llvm/lib/ 2>/dev/null || true ;;
+            esac
+          done
+          if [ "${{ matrix.os_name }}" = "linux-arm64" ] && [ ! -e release_pkg/tools/llvm/lib/libicui18n.so.70 ]; then
+            ICU_DEB_URL="https://ports.ubuntu.com/pool/main/i/icu/libicu70_70.1-2_arm64.deb"
+            curl --fail --location --retry 3 --output /tmp/libicu70-arm64.deb "$ICU_DEB_URL"
+            rm -rf /tmp/libicu70-arm64
+            dpkg-deb -x /tmp/libicu70-arm64.deb /tmp/libicu70-arm64
+            ICU_ROOT=/tmp/libicu70-arm64/usr/lib/aarch64-linux-gnu
+            if [ ! -d "$ICU_ROOT" ]; then
+              echo "::error::The ARM64 ICU package has no aarch64 library directory."
+              find /tmp/libicu70-arm64/usr -maxdepth 4 -type d -print
+              exit 1
+            fi
+            find "$ICU_ROOT" -maxdepth 1 \( -type f -o -type l \) -name 'libicu*.so*' -exec cp -a {} release_pkg/tools/llvm/lib/ \;
+            if [ ! -e release_pkg/tools/llvm/lib/libicui18n.so.70 ]; then
+              echo "::error::The ARM64 ICU package did not provide libicui18n.so.70."
+              find "$ICU_ROOT" -maxdepth 1 -print
+              exit 1
+            fi
+            rm -rf /tmp/libicu70-arm64 /tmp/libicu70-arm64.deb
+          fi
           rm -rf llvm_full
 
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
@@ -680,6 +705,7 @@ jobs:
 
           GLOBAL_LLVM_BIN="$PWD/../release_pkg/tools/llvm/bin"
           export PATH="$GLOBAL_LLVM_BIN:$PATH"
+          export LD_LIBRARY_PATH="$PWD/../release_pkg/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
           ACTIVE_WLC="$PWD/../boot_env/bin/wlc"
           ACTIVE_ENV="$PWD/../boot_env"
@@ -997,6 +1023,10 @@ jobs:
               strip -x $LLVM_BIN/* 2>/dev/null || true
             elif [ "${{ matrix.os_name }}" != "linux-x86" ]; then
               strip --strip-unneeded $LLVM_BIN/* 2>/dev/null || true
+            fi
+            if [ "${{ matrix.os_name }}" = "linux-arm64" ] && [ ! -e "$PWD/$LLVM_BIN/libicui18n.so.70" ]; then
+              echo "::error::The ARM64 LLVM package is missing libicui18n.so.70."
+              exit 1
             fi
             $LLVM_BIN/clang --version >/dev/null
             if [ -x "$LLVM_BIN/ld.lld" ]; then $LLVM_BIN/ld.lld --version >/dev/null; fi
