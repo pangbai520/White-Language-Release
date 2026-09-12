@@ -989,6 +989,8 @@ jobs:
         shell: bash
         run: |
           LLVM_BIN="release_pkg/tools/llvm/bin"
+          export LD_LIBRARY_PATH="$PWD/release_pkg/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           if [ -d "$LLVM_BIN" ]; then
             rm -f $LLVM_BIN/llvm-objdump*
             if [[ "$OSTYPE" == "darwin"* ]]; then
