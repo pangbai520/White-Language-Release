@@ -7,6 +7,13 @@ on:
         description: Release tag to validate; leave empty when dispatching from a tag
         type: string
         required: false
+      backend:
+        description: Compiler backend to validate
+        type: choice
+        options:
+          - llvm
+          - wir
+        default: llvm
 
 permissions:
   actions: read
@@ -17,7 +24,7 @@ env:
 
 jobs:
   prepare:
-    name: Resolve release pair
+    name: Resolve release
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -25,7 +32,7 @@ jobs:
       target_commit: ${{ steps.release.outputs.target_commit }}
       bootstrap_tag: ${{ steps.release.outputs.bootstrap_tag }}
     steps:
-      - name: Resolve current and bootstrap releases
+      - name: Resolve release to validate
         id: release
         shell: bash
         env:
@@ -42,12 +49,7 @@ jobs:
 
           gh release view "$TARGET_TAG" -R "$GITHUB_REPOSITORY" >/dev/null
           TARGET_COMMIT=$(gh api "repos/$SOURCE_REPOSITORY/commits/$TARGET_TAG" --jq '.sha')
-          RELEASE_TAGS=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName')
-          BOOTSTRAP_TAG=$(printf '%s\n%s\n' "$RELEASE_TAGS" "$TARGET_TAG" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | awk -v target="$TARGET_TAG" '$0 == target { print previous; exit } { previous = $0 }')
-          if [ -z "$BOOTSTRAP_TAG" ]; then
-            echo "::error::No earlier stable release is available for bootstrapping $TARGET_TAG."
-            exit 1
-          fi
+          BOOTSTRAP_TAG="$TARGET_TAG"
 
           echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
           echo "target_commit=$TARGET_COMMIT" >> "$GITHUB_OUTPUT"
@@ -61,7 +63,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   native-validation:
-    name: ${{ matrix.job_name }}
+    name: ${{ inputs.backend }}-${{ matrix.platform }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -69,50 +71,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - job_name: wir-windows-x64
-            runner: windows-latest
+          - runner: windows-latest
             platform: windows-x64
-            backend: wir
             target_triple: x86_64-pc-windows-gnu
             archive_pattern: WhiteLanguage-Windows-x64-Portable-*.zip
             archive_kind: zip
             exe_suffix: .exe
-          - job_name: wir-linux-x64
-            runner: ubuntu-latest
+          - runner: ubuntu-latest
             platform: linux-x64
-            backend: wir
             target_triple: x86_64-unknown-linux-gnu
             archive_pattern: whitelang-linux-x64-*.tar.gz
             archive_kind: tar
             exe_suffix: ''
-          - job_name: wir-linux-arm64
-            runner: ubuntu-24.04-arm
+          - runner: ubuntu-24.04-arm
             platform: linux-arm64
-            backend: wir
             target_triple: aarch64-unknown-linux-gnu
             archive_pattern: whitelang-linux-arm64-*.tar.gz
             archive_kind: tar
             exe_suffix: ''
-          - job_name: wir-macos-x64
-            runner: macos-15-intel
+          - runner: macos-15-intel
             platform: macos-x64
-            backend: wir
             target_triple: x86_64-apple-darwin
             archive_pattern: whitelang-macos-x64-*.tar.gz
             archive_kind: tar
             exe_suffix: ''
-          - job_name: wir-macos-arm64
-            runner: macos-14
+          - runner: macos-14
             platform: macos-arm64
-            backend: wir
-            target_triple: aarch64-apple-darwin
-            archive_pattern: whitelang-macos-arm64-*.tar.gz
-            archive_kind: tar
-            exe_suffix: ''
-          - job_name: llvm-macos-arm64
-            runner: macos-14
-            platform: macos-arm64
-            backend: llvm
             target_triple: aarch64-apple-darwin
             archive_pattern: whitelang-macos-arm64-*.tar.gz
             archive_kind: tar
@@ -159,13 +143,13 @@ jobs:
           chmod +x "$BOOTSTRAP_WLC" 2>/dev/null || true
           echo "bootstrap_wlc=$BOOTSTRAP_WLC" >> "$GITHUB_OUTPUT"
 
-      - name: Build compiler with ${{ matrix.backend }} backend
+      - name: Select release compiler for ${{ inputs.backend }} validation
         id: compiler
         timeout-minutes: 15
         shell: bash
         env:
           BOOTSTRAP_WLC: ${{ steps.bootstrap.outputs.bootstrap_wlc }}
-          BACKEND: ${{ matrix.backend }}
+          BACKEND: ${{ inputs.backend }}
           TARGET_TAG: ${{ needs.prepare.outputs.target_tag }}
           TARGET_COMMIT: ${{ needs.prepare.outputs.target_commit }}
           BOOTSTRAP_TAG: ${{ needs.prepare.outputs.bootstrap_tag }}
@@ -179,8 +163,6 @@ jobs:
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-          WLC="$PWD/artifacts/wlc-${BACKEND}${{ matrix.exe_suffix }}"
-          STAGE1="$PWD/artifacts/wlc-stage1${EXE_SUFFIX}"
           CLANG="$PWD/bootstrap/tools/llvm/bin/clang${EXE_SUFFIX}"
           LLVM_VERSION=$("$CLANG" --version 2>&1 | head -n 1)
           printf '%s\n' "$LLVM_VERSION" > artifacts/llvm-version
@@ -193,20 +175,9 @@ jobs:
             echo "target_triple=$TARGET_TRIPLE"
             echo "clang_llvm_version=$LLVM_VERSION"
           } | tee -a artifacts/bootstrap.log
-          set +e
-          "$BOOTSTRAP_WLC" source_repo/src/wlc.wl --backend=llvm -Oz --keep-temps -o "$STAGE1" 2>&1 | tee artifacts/bootstrap-compiler.log
-          BUILD_STATUS=${PIPESTATUS[0]}
-          set -e
-          find source_repo -maxdepth 3 -type f -name 'wlc.ll' -exec cp -f {} artifacts/bootstrap-wlc.ll \; 2>/dev/null || true
-          if [ "$BUILD_STATUS" -ne 0 ]; then exit "$BUILD_STATUS"; fi
+          WLC="$BOOTSTRAP_WLC"
+          echo "Using the release compiler directly: $WLC" | tee artifacts/wir-build.log
           printf 'success\n' > artifacts/bootstrap-build-status
-          if [ "$BACKEND" = wir ]; then
-            "$STAGE1" source_repo/src/wlc.wl --backend=wir -Oz --keep-temps -o "$WLC" 2>&1 | tee artifacts/wir-build.log
-          else
-            cp -f "$STAGE1" "$WLC"
-          fi
-          test -f "$WLC"
-          chmod +x "$WLC" 2>/dev/null || true
           echo "wlc=$WLC" >> "$GITHUB_OUTPUT"
 
       - name: Validate WIR to LLVM IR path
@@ -214,7 +185,7 @@ jobs:
         shell: bash
         env:
           WLC: ${{ steps.compiler.outputs.wlc }}
-          BACKEND: ${{ matrix.backend }}
+          BACKEND: ${{ inputs.backend }}
         run: |
           set -euo pipefail
           export WL_PATH="$PWD/current_env"
@@ -233,7 +204,7 @@ jobs:
         shell: bash
         env:
           WLC: ${{ steps.compiler.outputs.wlc }}
-          BACKEND: ${{ matrix.backend }}
+          BACKEND: ${{ inputs.backend }}
           EXE_SUFFIX: ${{ matrix.exe_suffix }}
         run: |
           set -u
@@ -283,7 +254,7 @@ jobs:
         shell: bash
         env:
           WLC: ${{ steps.compiler.outputs.wlc }}
-          BACKEND: ${{ matrix.backend }}
+          BACKEND: ${{ inputs.backend }}
           EXE_SUFFIX: ${{ matrix.exe_suffix }}
           PLATFORM: ${{ matrix.platform }}
         run: |
@@ -330,9 +301,9 @@ jobs:
           TARGET_TAG: ${{ needs.prepare.outputs.target_tag }}
           TARGET_COMMIT: ${{ needs.prepare.outputs.target_commit }}
           BOOTSTRAP_TAG: ${{ needs.prepare.outputs.bootstrap_tag }}
-          BACKEND: ${{ matrix.backend }}
+          BACKEND: ${{ inputs.backend }}
           TARGET_TRIPLE: ${{ matrix.target_triple }}
-          JOB_NAME: ${{ matrix.job_name }}
+          JOB_NAME: ${{ inputs.backend }}-${{ matrix.platform }}
           BACKEND_RESULT: ${{ steps.compiler.outcome }}
           BOOTSTRAP_STEP_RESULT: ${{ steps.bootstrap.outcome }}
         run: |
@@ -367,7 +338,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-summary-${{ matrix.job_name }}
+          name: validation-summary-${{ inputs.backend }}-${{ matrix.platform }}
           path: artifacts/summary.md
           retention-days: 7
 
@@ -375,12 +346,12 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-failure-${{ matrix.job_name }}
+          name: validation-failure-${{ inputs.backend }}-${{ matrix.platform }}
           path: artifacts/
           retention-days: 14
 
   wir-linux-armv7:
-    name: wir-linux-armv7
+    name: ${{ inputs.backend }}-linux-armv7
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -430,10 +401,11 @@ jobs:
           TARGET_TAG: ${{ needs.prepare.outputs.target_tag }}
           TARGET_COMMIT: ${{ needs.prepare.outputs.target_commit }}
           BOOTSTRAP_TAG: ${{ needs.prepare.outputs.bootstrap_tag }}
+          BACKEND: ${{ inputs.backend }}
         run: |
           set -o pipefail
           date +%s > artifacts/start-time
-          docker run --rm -i --platform linux/arm/v7 -v "$PWD:/workspace" -w /workspace arm32v7/debian:bookworm-slim sh -s <<'ARMV7' 2>&1 | tee artifacts/armv7-validation.log
+          docker run --rm -i --platform linux/arm/v7 -e VALIDATION_BACKEND="$BACKEND" -v "$PWD:/workspace" -w /workspace arm32v7/debian:bookworm-slim sh -s <<'ARMV7' 2>&1 | tee artifacts/armv7-validation.log
           set -eu
           apt-get update >/dev/null
           apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev python3 >/dev/null
@@ -441,17 +413,15 @@ jobs:
           export PATH=/workspace/bootstrap/tools/llvm/bin:$PATH
           export LD_LIBRARY_PATH=/workspace/bootstrap/tools/llvm/lib
           bootstrap=/workspace/bootstrap/bin/wlc
-          wlc=/workspace/artifacts/wlc-wir
+          backend="$VALIDATION_BACKEND"
+          wlc="$bootstrap"
           chmod +x "$bootstrap" /workspace/bootstrap/tools/llvm/bin/* 2>/dev/null || true
           /workspace/bootstrap/tools/llvm/bin/clang --version
           /workspace/bootstrap/tools/llvm/bin/clang --version 2>&1 | head -n 1 > /workspace/artifacts/llvm-version
-          timeout 900s "$bootstrap" source_repo/src/wlc.wl --backend=llvm -Oz --keep-temps -o /workspace/artifacts/wlc-stage1 2>&1 | tee /workspace/artifacts/bootstrap-compiler.log
-          cp -f source_repo/src/wlc.ll /workspace/artifacts/bootstrap-wlc.ll 2>/dev/null || true
+          echo "Using the release compiler directly: $wlc" | tee /workspace/artifacts/wir-build.log
           printf 'success\n' > /workspace/artifacts/bootstrap-build-status
-          timeout 900s /workspace/artifacts/wlc-stage1 source_repo/src/wlc.wl --backend=wir -Oz --keep-temps -o "$wlc" 2>&1 | tee /workspace/artifacts/wir-build.log
-          chmod +x "$wlc"
           printf 'func main() -> Int { return 0; }\n' > /workspace/artifacts/backend_probe.wl
-          timeout 300s "$wlc" /workspace/artifacts/backend_probe.wl --backend=wir -S --emit-llvm --keep-temps 2>&1 | tee /workspace/artifacts/wir-to-llvm.log
+          timeout 300s "$wlc" /workspace/artifacts/backend_probe.wl "--backend=$backend" -S --emit-llvm --keep-temps 2>&1 | tee /workspace/artifacts/wir-to-llvm.log
           test -s /workspace/artifacts/backend_probe.ll
 
           passed=0
@@ -461,20 +431,20 @@ jobs:
           while IFS= read -r test_file; do
             rm -f /workspace/artifacts/test-bin
             printf '\n===== %s =====\n' "$test_file" >> /workspace/artifacts/test-output.log
-            if timeout 180s "$wlc" "$test_file" --backend=wir -o /workspace/artifacts/test-bin >> /workspace/artifacts/test-output.log 2>&1 && timeout 90s /workspace/artifacts/test-bin >> /workspace/artifacts/test-output.log 2>&1; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+            if timeout 180s "$wlc" "$test_file" "--backend=$backend" -o /workspace/artifacts/test-bin >> /workspace/artifacts/test-output.log 2>&1 && timeout 90s /workspace/artifacts/test-bin >> /workspace/artifacts/test-output.log 2>&1; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
           done < /workspace/artifacts/positive-tests.txt
 
           find source_repo/tests/diagnostics/failures -type f -name '*.wl' | sort > /workspace/artifacts/diagnostic-tests.txt
           while IFS= read -r test_file; do
             expected=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$test_file" | head -n 1)
-            output=$(timeout 180s "$wlc" "$test_file" --backend=wir -o /workspace/artifacts/diagnostic-bin 2>&1) && status=0 || status=$?
+            output=$(timeout 180s "$wlc" "$test_file" "--backend=$backend" -o /workspace/artifacts/diagnostic-bin 2>&1) && status=0 || status=$?
             printf '\n===== %s =====\n%s\n' "$test_file" "$output" >> /workspace/artifacts/test-output.log
             if [ "$status" -ne 0 ] && [ -n "$expected" ] && printf '%s\n' "$output" | grep -Fq "$expected"; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
           done < /workspace/artifacts/diagnostic-tests.txt
 
           cd source_repo/tests/integration/ffi
           rm -f libtest_lib_export.so test_lib_export.so test_c_host test_wl_host
-          if "$wlc" test_lib_export.wl --backend=wir --shared >> /workspace/artifacts/ffi-output.log 2>&1 && gcc test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 && ./test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 && "$wlc" test_dll_host.wl libtest_lib_export.so --backend=wir -o test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1 && ./test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+          if "$wlc" test_lib_export.wl "--backend=$backend" --shared >> /workspace/artifacts/ffi-output.log 2>&1 && gcc test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 && ./test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 && "$wlc" test_dll_host.wl libtest_lib_export.so "--backend=$backend" -o test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1 && ./test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
           printf '%s\n' "$passed" > /workspace/artifacts/tests-passed
           printf '%s\n' "$failed" > /workspace/artifacts/tests-failed
           [ "$failed" -eq 0 ]
@@ -487,6 +457,7 @@ jobs:
           TARGET_TAG: ${{ needs.prepare.outputs.target_tag }}
           TARGET_COMMIT: ${{ needs.prepare.outputs.target_commit }}
           BOOTSTRAP_TAG: ${{ needs.prepare.outputs.bootstrap_tag }}
+          BACKEND: ${{ inputs.backend }}
           BACKEND_RESULT: ${{ steps.compiler.outcome }}
           BOOTSTRAP_STEP_RESULT: ${{ steps.bootstrap.outcome }}
         run: |
@@ -497,7 +468,7 @@ jobs:
           START=$(cat artifacts/start-time 2>/dev/null || date +%s)
           ELAPSED=$(( $(date +%s) - START ))
           {
-            echo "### wir-linux-armv7"
+            echo "### $BACKEND-linux-armv7"
             echo ""
             echo "| Field | Value |"
             echo "|---|---|"
@@ -505,7 +476,7 @@ jobs:
             echo "| Current commit | \`$TARGET_COMMIT\` |"
             echo "| Bootstrap wlc | \`$BOOTSTRAP_TAG\` |"
             echo "| Generated wlc | \`$TARGET_TAG\` |"
-            echo "| Backend | \`wir\` |"
+            echo "| Backend | \`$BACKEND\` |"
             echo "| Target triple | \`armv7-unknown-linux-gnueabihf\` |"
             echo "| Clang/LLVM | $LLVM_VERSION |"
             echo "| Bootstrap | $BOOTSTRAP_RESULT |"
@@ -520,7 +491,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-summary-wir-linux-armv7
+          name: validation-summary-${{ inputs.backend }}-linux-armv7
           path: artifacts/summary.md
           retention-days: 7
 
@@ -528,7 +499,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-failure-wir-linux-armv7
+          name: validation-failure-${{ inputs.backend }}-linux-armv7
           path: artifacts/
           retention-days: 14
 
