@@ -156,7 +156,12 @@ jobs:
           export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          if [[ "$TARGET_TRIPLE" == *apple-darwin ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+            bash .github/scripts/setup-macos-linker.sh bootstrap/tools/llvm
+            export SDKROOT=$(xcrun --show-sdk-path)
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+          fi
           CLANG="$PWD/bootstrap/tools/llvm/bin/clang${EXE_SUFFIX}"
           LLVM_VERSION=$("$CLANG" --version 2>&1 | head -n 1)
           printf '%s\n' "$LLVM_VERSION" > artifacts/llvm-version
@@ -187,7 +192,11 @@ jobs:
           export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          if [[ "$OSTYPE" == darwin* ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+            export SDKROOT=$(xcrun --show-sdk-path)
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+          fi
           printf 'func main() -> Int { return 0; }\n' > artifacts/backend_probe.wl
           rm -f artifacts/backend_probe.ll
           python .github/scripts/run-with-timeout.py 180 "$WLC" artifacts/backend_probe.wl "--backend=$BACKEND" -S --emit-llvm --keep-temps 2>&1 | tee artifacts/wir-to-llvm.log
@@ -223,7 +232,11 @@ jobs:
           export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          if [[ "$OSTYPE" == darwin* ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+            export SDKROOT=$(xcrun --show-sdk-path)
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+          fi
           PASSED=0
           FAILED=0
           : > artifacts/test-output.log
@@ -293,7 +306,11 @@ jobs:
           export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          if [[ "$OSTYPE" == darwin* ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+            export SDKROOT=$(xcrun --show-sdk-path)
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+          fi
           CLANG="$PWD/bootstrap/tools/llvm/bin/clang$EXE_SUFFIX"
           FFI_DIR="$PWD/source_repo/tests/integration/ffi"
           run_ffi() { python "$GITHUB_WORKSPACE/.github/scripts/run-with-timeout.py" 180 "$@"; }

@@ -207,6 +207,85 @@ class Deadlines(unittest.TestCase):
         self.assertIn(b"Timed out", result.stderr)
 
 
+class MacToolchain(unittest.TestCase):
+    def setUp(self):
+        self.bash = bash_program()
+        if not self.bash:
+            self.skipTest("Bash is unavailable")
+        self.directory = tempfile.TemporaryDirectory(prefix="white-ci-mac-tools-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.llvm = self.root / "LLVM package"
+        (self.llvm / "bin").mkdir(parents=True)
+        self.executable("clang")
+
+    def executable(self, name):
+        path = self.llvm / "bin" / name
+        path.write_text("#!/bin/sh\nprintf 'test tool version\\n'\n", encoding="utf-8", newline="\n")
+        path.chmod(0o755)
+
+    def setup_linker(self):
+        return subprocess.run([self.bash, str(SCRIPTS / "setup-macos-linker.sh"), str(self.llvm)],
+                              cwd=self.root, capture_output=True, timeout=15)
+
+    def test_config_is_relocatable_and_repeatable(self):
+        self.executable("ld64.lld")
+        config = self.llvm / "bin/clang.cfg"
+        config.write_text("-Wno-override-module\n", encoding="utf-8")
+        target = self.llvm / "bin/arm64-apple-darwin.cfg"
+        target.write_text("-mmacosx-version-min=11.0\n", encoding="utf-8")
+        for repeat in range(2):
+            result = self.setup_linker()
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        for file in (config, target):
+            self.assertEqual(file.read_text().count("-fuse-ld=lld"), 1)
+            self.assertNotIn(str(self.root), file.read_text())
+        self.assertIn("-Wno-override-module", config.read_text())
+
+    def test_generic_lld_supplies_the_macho_alias(self):
+        self.executable("lld")
+        result = self.setup_linker()
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertTrue((self.llvm / "bin/ld64.lld").is_file())
+
+    def test_missing_lld_fails_instead_of_using_the_system_linker(self):
+        result = self.setup_linker()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"complete macOS LLVM toolchain", result.stderr)
+
+    def test_conflicting_linker_config_is_rejected(self):
+        self.executable("ld64.lld")
+        (self.llvm / "bin/clang.cfg").write_text("-fuse-ld=/some/other/ld\n", encoding="utf-8")
+        result = self.setup_linker()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"Conflicting linker selection", result.stderr)
+
+    def test_matching_flag_does_not_hide_a_conflicting_path(self):
+        self.executable("ld64.lld")
+        (self.llvm / "bin/clang.cfg").write_text(
+            "-fuse-ld=lld\n--ld-path=/some/other/ld\n", encoding="utf-8")
+        result = self.setup_linker()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"Conflicting linker selection", result.stderr)
+
+    def test_dylib_directories_are_preserved(self):
+        library = self.root / "llvm_full/lib"
+        (library / "c++").mkdir(parents=True)
+        (library / "libc++.1.dylib").write_text("root runtime", encoding="utf-8")
+        (library / "c++/libc++.1.dylib").write_text("private runtime", encoding="utf-8")
+        workflow = (SCRIPTS.parent / "workflows/release.yml").read_text(encoding="utf-8")
+        match = re.search(r'(find llvm_full -type f -o -type l \| while IFS= read -r library; do\n.*?\n          done)',
+                          workflow, re.DOTALL)
+        self.assertIsNotNone(match)
+        script = textwrap.dedent(match.group(1)).replace('${{ matrix.os_name }}', "macos-arm64")
+        result = subprocess.run([self.bash, "-e", "-s"], input=script.encode(), cwd=self.root,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        copied = self.root / "release_pkg/tools/llvm/lib"
+        self.assertEqual((copied / "libc++.1.dylib").read_text(), "root runtime")
+        self.assertEqual((copied / "c++/libc++.1.dylib").read_text(), "private runtime")
+
+
 class Diagnostics(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="white-ci-diagnostic-")

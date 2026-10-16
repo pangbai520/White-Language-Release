@@ -375,14 +375,24 @@ jobs:
           fi
           mkdir -p release_pkg/tools/llvm/bin release_pkg/tools/llvm/lib
           cp -a llvm_full/bin/clang llvm_full/bin/clang-[0-9]* release_pkg/tools/llvm/bin/ 2>/dev/null || true
-          cp -a llvm_full/bin/ld.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
+          cp -a llvm_full/bin/ld.lld* llvm_full/bin/ld64.lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_full/bin/lld* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_full/bin/llvm-objdump* release_pkg/tools/llvm/bin/ 2>/dev/null || true
           cp -a llvm_full/lib/clang release_pkg/tools/llvm/lib/
-          # clang and lld from the official archives use the sibling LLVM/ICU shared libraries.
+          # Darwin dylibs use loader-relative paths, flattening lib/c++ into lib
+          # can replace another runtime with the same filename.
           find llvm_full -type f -o -type l | while IFS= read -r library; do
             case "$library" in
-              *.so|*.so.*|*.dylib|*.dylib.*) cp -a "$library" release_pkg/tools/llvm/lib/ 2>/dev/null || true ;;
+              *.so|*.so.*|*.dylib|*.dylib.*)
+                if [[ "${{ matrix.os_name }}" == macos-* ]]; then
+                  relative=${library#llvm_full/}
+                  destination="release_pkg/tools/llvm/$relative"
+                  mkdir -p "$(dirname "$destination")"
+                  cp -a "$library" "$destination"
+                else
+                  cp -a "$library" release_pkg/tools/llvm/lib/
+                fi
+                ;;
             esac
           done
           if [ "${{ matrix.os_name }}" = "linux-arm64" ] && [ ! -e release_pkg/tools/llvm/lib/libicui18n.so.70 ]; then
@@ -405,6 +415,27 @@ jobs:
             rm -rf /tmp/libicu70-arm64 /tmp/libicu70-arm64.deb
           fi
           rm -rf llvm_full
+
+      - name: "[macOS] Configure and check the packaged Clang and LLD"
+        if: startsWith(matrix.os_name, 'macos')
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+          export SDKROOT=$(xcrun --show-sdk-path)
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          bash .github/scripts/setup-macos-linker.sh release_pkg/tools/llvm
+          CLANG="$PWD/release_pkg/tools/llvm/bin/clang"
+          "$CLANG" --version
+          otool -L "$CLANG"
+          otool -L release_pkg/tools/llvm/bin/ld64.lld
+          probe=$(mktemp -d "$RUNNER_TEMP/white-clang.XXXXXX")
+          trap 'rm -f "$probe/main.ll" "$probe/main" "$probe/library.dylib"; rmdir "$probe"' EXIT
+          printf 'define i32 @main() { ret i32 0 }\n' > "$probe/main.ll"
+          "$CLANG" -v "$probe/main.ll" -o "$probe/main"
+          "$probe/main"
+          "$CLANG" "$probe/main.ll" -dynamiclib -o "$probe/library.dylib"
 
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows')
@@ -716,6 +747,13 @@ jobs:
             tar -xzf boot_dl/*.tar.gz -C boot_env
           fi
 
+          if [[ "${{ matrix.os_name }}" == macos-* ]]; then
+            # Every generation must use the checked compiler/linker pair,
+            # including Stage 1 driven by the previous release compiler.
+            rm -rf boot_env/tools
+            cp -a release_pkg/tools boot_env/tools
+          fi
+
           cd source_repo
           RELEASE_TAG="$TARGET_REF"
           VERSION_NO_V="${RELEASE_TAG#v}"
@@ -767,6 +805,7 @@ jobs:
           }
 
           if [[ "${{ matrix.os_name }}" == macos-* ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
             export SDKROOT=$(xcrun --show-sdk-path)
             export MACOSX_DEPLOYMENT_TARGET=11.0
           fi
@@ -1048,8 +1087,10 @@ jobs:
         run: |
           LLVM_BIN="release_pkg/tools/llvm/bin"
           LLVM_ROOT="${LLVM_BIN%/bin}"
-          export LD_LIBRARY_PATH="$PWD/release_pkg/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          if [[ "${{ matrix.os_name }}" == linux-* ]]; then
+            export LD_LIBRARY_PATH="$PWD/release_pkg/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          fi
           if [ -d "$LLVM_BIN" ]; then
             rm -f $LLVM_BIN/llvm-objdump*
             if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -1070,6 +1111,7 @@ jobs:
         run: |
           export WL_PATH="$PWD/release_pkg"
           if [[ "${{ matrix.os_name }}" == macos-* ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
             export SDKROOT=$(xcrun --show-sdk-path)
             export MACOSX_DEPLOYMENT_TARGET=11.0
           fi
@@ -1126,6 +1168,7 @@ jobs:
         run: |
           export WL_PATH="$PWD/release_pkg"
           if [[ "${{ matrix.os_name }}" == macos-* ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
             export SDKROOT=$(xcrun --show-sdk-path)
             export MACOSX_DEPLOYMENT_TARGET=11.0
           fi
@@ -1208,6 +1251,7 @@ jobs:
         run: |
           export WL_PATH="$PWD/release_pkg"
           if [[ "${{ matrix.os_name }}" == macos-* ]]; then
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
             export SDKROOT=$(xcrun --show-sdk-path)
             export MACOSX_DEPLOYMENT_TARGET=11.0
           fi
