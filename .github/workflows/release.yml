@@ -53,6 +53,10 @@ jobs:
       build_armv7: ${{ steps.config.outputs.build_armv7 }}
       publish: ${{ steps.config.outputs.publish }}
       full_release: ${{ steps.config.outputs.full_release }}
+      prerelease: ${{ steps.config.outputs.prerelease }}
+      bootstrap_tag: ${{ steps.bootstrap.outputs.bootstrap_tag }}
+      source_base_commit: ${{ steps.bootstrap.outputs.source_base_commit }}
+      target_commit: ${{ steps.bootstrap.outputs.target_commit }}
     steps:
       - name: Select build targets
         id: config
@@ -100,6 +104,10 @@ jobs:
             full_release=false
           fi
 
+          if [ "$publish" = true ] && ! printf '%s\n' "$release_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid release tag '$release_tag'."
+            exit 1
+          fi
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
@@ -107,6 +115,50 @@ jobs:
           echo "build_armv7=$build_armv7" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "full_release=$full_release" >> "$GITHUB_OUTPUT"
+          version_core=${release_tag%%+*}
+          if [[ "$version_core" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release scripts
+        if: steps.config.outputs.publish == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.config.outputs.publish == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Checkout source history
+        if: steps.config.outputs.publish == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: whitelanguage/white
+          ref: ${{ steps.config.outputs.release_tag }}
+          path: source_repo
+          fetch-depth: 0
+
+      - name: Test release helpers
+        if: steps.config.outputs.publish == 'true'
+        run: python .github/scripts/test_workflows.py -v
+
+      - name: Select a compatible published bootstrap
+        if: steps.config.outputs.publish == 'true'
+        id: bootstrap
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TAG: ${{ steps.config.outputs.release_tag }}
+          TARGET_MATRIX: ${{ steps.config.outputs.matrix }}
+          BUILD_ARMV7: ${{ steps.config.outputs.build_armv7 }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          platforms=$(printf '%s' "$TARGET_MATRIX" | jq -r 'map(.os_name) | join(",")')
+          if [ "$BUILD_ARMV7" = true ]; then platforms="$platforms,linux-armv7"; fi
+          python .github/scripts/bootstrap-plan.py select --source source_repo --target "$TARGET_TAG" \
+            --releases releases.json --platforms "$platforms" \
+            --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   warm-llvm-cache:
     name: Cache LLVM for ${{ matrix.os_name }}
@@ -184,6 +236,9 @@ jobs:
     env:
       TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
       VERSION_NO_V: ${{ needs.prepare-release.outputs.version }}
+      BOOTSTRAP_TAG: ${{ needs.prepare-release.outputs.bootstrap_tag }}
+      SOURCE_BASE_COMMIT: ${{ needs.prepare-release.outputs.source_base_commit }}
+      TARGET_COMMIT: ${{ needs.prepare-release.outputs.target_commit }}
 
     strategy:
       fail-fast: false
@@ -194,12 +249,17 @@ jobs:
       - name: Checkout Builder Repo
         uses: actions/checkout@v4
 
+      - name: Set up validation Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Checkout White Language Source
         uses: actions/checkout@v4
         with:
           repository: 'whitelanguage/white'
           path: 'source_repo'
-          ref: ${{ env.TARGET_REF }}
+          ref: ${{ env.TARGET_COMMIT }}
           fetch-depth: 0
 
       - name: Remove Blacklisted Folders
@@ -232,8 +292,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p boot_env boot_dl
-          RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG="$BOOTSTRAP_TAG"
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a previous release for ${{ matrix.os_name }}."
             exit 1
@@ -349,15 +408,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p boot_env boot_dl
-          RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG="$BOOTSTRAP_TAG"
 
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a valid previous release tag to bootstrap from."
             exit 1
           fi
-
-          SOURCE_BASE_TAG="$PREV_TAG"
 
           echo "Bootstrapping from previous release: $PREV_TAG"
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-*.zip" --dir boot_dl --clobber
@@ -384,8 +440,8 @@ jobs:
           cd source_repo
           RELEASE_TAG="$TARGET_REF"
           VERSION_NO_V="${RELEASE_TAG#v}"
-          COMMITS=$(git rev-list --reverse "${SOURCE_BASE_TAG}..${TARGET_REF}")
-          FINAL_COMMIT=$(git rev-parse "$RELEASE_TAG^{commit}")
+          FINAL_COMMIT="$TARGET_COMMIT"
+          COMMITS=$(python ../.github/scripts/bootstrap-plan.py order --source . --base "$SOURCE_BASE_COMMIT" --target "$FINAL_COMMIT")
           COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
 
           if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
@@ -421,28 +477,10 @@ jobs:
 
           run_bootstrap_attempt() {
             local timeout_seconds="${WLC_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
-            local marker="/tmp/wlc-bootstrap-timeout-$$-$RANDOM"
             local status=0
-            rm -f "$marker"
-            "$@" &
-            local compiler_pid=$!
-            (
-              sleep "$timeout_seconds"
-              if kill -0 "$compiler_pid" 2>/dev/null; then
-                echo "::warning::Bootstrap compiler exceeded ${timeout_seconds}s; trying the next compatibility fallback."
-                : > "$marker"
-                kill "$compiler_pid" 2>/dev/null || true
-                sleep 5
-                kill -9 "$compiler_pid" 2>/dev/null || true
-              fi
-            ) &
-            local watchdog_pid=$!
-            wait "$compiler_pid" || status=$?
-            kill "$watchdog_pid" 2>/dev/null || true
-            wait "$watchdog_pid" 2>/dev/null || true
-            if [ -f "$marker" ]; then
-              rm -f "$marker"
-              return 124
+            python "$GITHUB_WORKSPACE/.github/scripts/run-with-timeout.py" "$timeout_seconds" "$@" || status=$?
+            if [ "$status" -eq 124 ]; then
+              echo "::warning::Bootstrap exceeded ${timeout_seconds}s, compiler and child processes were stopped."
             fi
             return "$status"
           }
@@ -655,15 +693,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p boot_env boot_dl
-          RELEASE_TAGS=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName')
-          PREV_TAG=$(printf '%s\n' "$RELEASE_TAGS" | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG="$BOOTSTRAP_TAG"
 
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a valid previous release tag to bootstrap from."
             exit 1
           fi
-
-          SOURCE_BASE_TAG="$PREV_TAG"
 
           echo "Bootstrapping from previous release: $PREV_TAG"
           if [ ! -f boot_env/bin/wlc ]; then
@@ -674,8 +709,8 @@ jobs:
           cd source_repo
           RELEASE_TAG="$TARGET_REF"
           VERSION_NO_V="${RELEASE_TAG#v}"
-          COMMITS=$(git rev-list --reverse "${SOURCE_BASE_TAG}..${TARGET_REF}")
-          FINAL_COMMIT=$(git rev-parse "$RELEASE_TAG^{commit}")
+          FINAL_COMMIT="$TARGET_COMMIT"
+          COMMITS=$(python ../.github/scripts/bootstrap-plan.py order --source . --base "$SOURCE_BASE_COMMIT" --target "$FINAL_COMMIT")
           COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
 
           if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
@@ -713,28 +748,10 @@ jobs:
 
           run_bootstrap_attempt() {
             local timeout_seconds="${WLC_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
-            local marker="/tmp/wlc-bootstrap-timeout-$$-$RANDOM"
             local status=0
-            rm -f "$marker"
-            "$@" &
-            local compiler_pid=$!
-            (
-              sleep "$timeout_seconds"
-              if kill -0 "$compiler_pid" 2>/dev/null; then
-                echo "::warning::Bootstrap compiler exceeded ${timeout_seconds}s; trying the next compatibility fallback."
-                : > "$marker"
-                kill "$compiler_pid" 2>/dev/null || true
-                sleep 5
-                kill -9 "$compiler_pid" 2>/dev/null || true
-              fi
-            ) &
-            local watchdog_pid=$!
-            wait "$compiler_pid" || status=$?
-            kill "$watchdog_pid" 2>/dev/null || true
-            wait "$watchdog_pid" 2>/dev/null || true
-            if [ -f "$marker" ]; then
-              rm -f "$marker"
-              return 124
+            python "$GITHUB_WORKSPACE/.github/scripts/run-with-timeout.py" "$timeout_seconds" "$@" || status=$?
+            if [ "$status" -eq 124 ]; then
+              echo "::warning::Bootstrap exceeded ${timeout_seconds}s, compiler and child processes were stopped."
             fi
             return "$status"
           }
@@ -1051,7 +1068,7 @@ jobs:
             echo "Running test: $file"
 
             rm -f test_bin test_bin.exe
-            if ! "$WLC" "$file" -o test_bin; then
+            if ! python .github/scripts/run-with-timeout.py 180 "$WLC" "$file" -o test_bin; then
               echo "::error file=$file::Compilation Failed"
               FAILED_FILES+=("[Compile Error] $file")
               ERRORS=$((ERRORS+1))
@@ -1065,7 +1082,7 @@ jobs:
             fi
 
             set +e
-            OUTPUT=$($TEST_BIN 2>&1)
+            OUTPUT=$(python .github/scripts/run-with-timeout.py 90 "$TEST_BIN" 2>&1)
             STATUS=$?
             set -e
             if [ $STATUS -ne 0 ] || ! grep -Fq "PASS:" <<< "$OUTPUT"; then
@@ -1115,7 +1132,7 @@ jobs:
 
             rm -f diagnostic_bin diagnostic_bin.exe
             set +e
-            BUILD_OUTPUT=$("$WLC" "$file" -o diagnostic_bin 2>&1)
+            BUILD_OUTPUT=$(python .github/scripts/run-with-timeout.py 180 "$WLC" "$file" -o diagnostic_bin 2>&1)
             BUILD_STATUS=$?
             set -e
             RUN_OUTPUT=""
@@ -1128,7 +1145,7 @@ jobs:
                 DIAGNOSTIC_BIN="./diagnostic_bin"
               fi
               set +e
-              RUN_OUTPUT=$($DIAGNOSTIC_BIN 2>&1)
+              RUN_OUTPUT=$(python .github/scripts/run-with-timeout.py 90 "$DIAGNOSTIC_BIN" 2>&1)
               RUN_STATUS=$?
               set -e
             fi
@@ -1138,7 +1155,12 @@ jobs:
               OUTPUT="${OUTPUT}"$'\n'"${RUN_OUTPUT}"
             fi
 
-            if [ $BUILD_STATUS -eq 0 ] && [ $RUN_STATUS -eq 0 ]; then
+            if [ "$BUILD_STATUS" -eq 124 ] || [ "$BUILD_STATUS" -eq 137 ] || [ "$RUN_STATUS" -eq 124 ] || [ "$RUN_STATUS" -eq 137 ]; then
+              echo "::error file=$file::Diagnostic test exceeded its deadline"
+              echo "$OUTPUT"
+              FAILED_FILES+=("[Timeout] $file")
+              ERRORS=$((ERRORS+1))
+            elif [ $BUILD_STATUS -eq 0 ] && [ $RUN_STATUS -eq 0 ]; then
               echo "::error file=$file::Test was expected to fail but completed successfully"
               echo "Expected: $EXPECTED"
               FAILED_FILES+=("[Unexpected Success] $file")
@@ -1180,6 +1202,7 @@ jobs:
           CLANG="$PWD/release_pkg/tools/llvm/bin/clang"
           [ -f "${CLANG}.exe" ] && CLANG="${CLANG}.exe"
           FFI_DIR="$PWD/source_repo/tests/integration/ffi"
+          run_ffi() { python "$GITHUB_WORKSPACE/.github/scripts/run-with-timeout.py" 180 "$@"; }
 
           cd "$FFI_DIR"
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_lib_export.so libtest_lib_export.so libtest_lib_export.dylib
@@ -1188,11 +1211,7 @@ jobs:
             rm -f test_c_host test_c_host.exe
           fi
 
-          if [[ "${{ matrix.os_name }}" == windows-* ]]; then
-            "$WLC" test_lib_export.wl --shared
-          else
-            "$WLC" test_lib_export.wl --shared
-          fi
+          run_ffi "$WLC" test_lib_export.wl --shared
 
           if [[ "${{ matrix.os_name }}" == windows-* ]]; then
             SHARED_LIB="test_lib_export.dll"
@@ -1207,7 +1226,7 @@ jobs:
             SHARED_LIB="libtest_lib_export.dylib"
             WL_LINK_LIB="$SHARED_LIB"
             cp "$SHARED_LIB" test_lib_export.so
-            "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,@loader_path -o test_c_host
+            run_ffi "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,@loader_path -o test_c_host
             C_HOST="./test_c_host"
             WL_HOST="test_wl_host"
             export DYLD_LIBRARY_PATH="$PWD${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
@@ -1215,37 +1234,63 @@ jobs:
             SHARED_LIB="libtest_lib_export.so"
             WL_LINK_LIB="$SHARED_LIB"
             cp "$SHARED_LIB" test_lib_export.so
-            "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
+            run_ffi "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host
             C_HOST="./test_c_host"
             WL_HOST="test_wl_host"
             export LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           fi
 
-          C_OUTPUT=$($C_HOST 2>&1)
+          C_OUTPUT=$(run_ffi "$C_HOST" 2>&1)
           echo "$C_OUTPUT"
           grep -Fq "PASS:" <<< "$C_OUTPUT"
 
           if [ "${{ matrix.os_name }}" == "linux-x86" ]; then
-            PYTHON_OUTPUT=$(docker run --rm --platform linux/386 -v "$PWD:/ffi" -w /ffi i386/debian:bookworm-slim sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends python3 >/dev/null && LD_LIBRARY_PATH=/ffi python3 test_dll_host.py' 2>&1)
+            PYTHON_OUTPUT=$(docker run --rm --platform linux/386 -v "$PWD:/ffi" -w /ffi i386/debian:bookworm-slim sh -c 'timeout 300s sh -c "apt-get update >/dev/null && apt-get install -y --no-install-recommends python3 >/dev/null" && LD_LIBRARY_PATH=/ffi timeout 90s python3 test_dll_host.py' 2>&1)
           else
-            if command -v python3 >/dev/null 2>&1; then
-              PYTHON=python3
-            else
-              PYTHON=python
-            fi
-            PYTHON_OUTPUT=$($PYTHON test_dll_host.py 2>&1)
+            PYTHON_OUTPUT=$(run_ffi python test_dll_host.py 2>&1)
           fi
           echo "$PYTHON_OUTPUT"
           grep -Fq "PASS:" <<< "$PYTHON_OUTPUT"
 
-          "$WLC" test_dll_host.wl "$WL_LINK_LIB" -o "$WL_HOST"
-          WL_OUTPUT=$(./"$WL_HOST" 2>&1)
+          run_ffi "$WLC" test_dll_host.wl "$WL_LINK_LIB" -o "$WL_HOST"
+          WL_OUTPUT=$(run_ffi ./"$WL_HOST" 2>&1)
           echo "$WL_OUTPUT"
           grep -Fq "PASS:" <<< "$WL_OUTPUT"
 
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_lib_export.so libtest_lib_export.so libtest_lib_export.dylib
           rm -f test_c_host test_c_host.exe test_wl_host test_wl_host.exe
           echo "All FFI tests passed."
+
+      - name: Validate experimental machine backend
+        if: matrix.os_name == 'windows-x64' || matrix.os_name == 'linux-x64'
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f source_repo/src/compiler/machine/pipeline.wl ]; then
+            echo "::notice::This source release predates the machine backend."
+            exit 0
+          fi
+          export PATH="$PWD/release_pkg/tools/llvm/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/release_pkg/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          WLC="$PWD/release_pkg/bin/wlc"
+          if [ -f "$WLC.exe" ]; then WLC="$WLC.exe"; fi
+          python .github/scripts/validate-machine.py --wlc "$WLC" --source source_repo \
+            --artifacts machine-validation --levels O0 O2 Oz
+
+      - name: Store machine validation logs
+        if: always() && (matrix.os_name == 'windows-x64' || matrix.os_name == 'linux-x64')
+        uses: actions/upload-artifact@v4
+        with:
+          name: machine-validation-${{ matrix.os_name }}
+          path: |
+            machine-validation/*.log
+            machine-validation/*.json
+            machine-validation/*.txt
+            machine-validation/*status
+            machine-validation/*sha256
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: "[Windows] Compile InnoSetup Installer"
         if: startsWith(matrix.os_name, 'windows')
@@ -1308,6 +1353,8 @@ jobs:
       TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
       VERSION_NO_V: ${{ needs.prepare-release.outputs.version }}
       FULL_RELEASE: ${{ needs.prepare-release.outputs.full_release }}
+      BOOTSTRAP_TAG: ${{ needs.prepare-release.outputs.bootstrap_tag }}
+      TARGET_COMMIT: ${{ needs.prepare-release.outputs.target_commit }}
 
     steps:
       - name: Checkout release repository
@@ -1318,7 +1365,7 @@ jobs:
         with:
           repository: whitelanguage/white
           path: source_repo
-          ref: ${{ env.TARGET_REF }}
+          ref: ${{ env.TARGET_COMMIT }}
           fetch-depth: 0
 
       - name: Restore native Linux x64 build
@@ -1341,7 +1388,7 @@ jobs:
           fi
 
           mkdir -p arm_dl host_env release_pkg/bin release_pkg/std Output Output_Snapshots
-          PREV_TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --json tagName --jq '.[].tagName' | grep -v "^${TARGET_REF}$" | grep -v '^temp$' | grep -v "snapshot" | head -n 1)
+          PREV_TAG="$BOOTSTRAP_TAG"
           if [ -z "$PREV_TAG" ]; then
             echo "::error::Could not find a previous release for linux-armv7."
             exit 1
@@ -1379,7 +1426,7 @@ jobs:
           cd source_repo
           git config --global --add safe.directory "$PWD"
 
-          FINAL_COMMIT=$(git rev-parse "$TARGET_REF^{commit}")
+          FINAL_COMMIT="$TARGET_COMMIT"
           RELEASE_VERSION=${TARGET_REF#v}
           COMMIT_DATE=$(git show -s --format=%cs "$FINAL_COMMIT")
           CROSS_TARGET=armv7-unknown-linux-gnueabihf
@@ -1414,8 +1461,8 @@ jobs:
             }
             mv src/wlc.wl.release src/wlc.wl
           }
-          compile_arm() { WL_PATH="$HOST_ENV" "$HOST_WLC" "$@" --target="$CROSS_TARGET"; }
-          run_arm() { WL_PATH="$ARM_ENV" qemu-arm -L "$QEMU_ROOT" "$@"; }
+          compile_arm() { timeout 180s env WL_PATH="$HOST_ENV" "$HOST_WLC" "$@" --target="$CROSS_TARGET"; }
+          run_arm() { timeout 90s env WL_PATH="$ARM_ENV" qemu-arm -L "$QEMU_ROOT" "$@"; }
           emit_host_ir() {
             rm -f src/wlc.ll
             WL_PATH="$ARM_ENV" "$HOST_WLC" src/wlc.wl -S --emit-llvm -Oz --target="$CROSS_TARGET"
@@ -1488,6 +1535,10 @@ jobs:
             if [ -n "$RUN_OUTPUT" ]; then
               OUTPUT="${OUTPUT}"$'\n'"${RUN_OUTPUT}"
             fi
+            if [ "$BUILD_STATUS" -eq 124 ] || [ "$BUILD_STATUS" -eq 137 ] || [ "$RUN_STATUS" -eq 124 ] || [ "$RUN_STATUS" -eq 137 ]; then
+              echo "diagnostic test exceeded its deadline: $TEST_FILE" >&2
+              exit 1
+            fi
             if [ "$BUILD_STATUS" -eq 0 ] && [ "$RUN_STATUS" -eq 0 ]; then
               echo "diagnostic test completed successfully: $TEST_FILE" >&2
               echo "expected: $EXPECTED" >&2
@@ -1512,7 +1563,7 @@ jobs:
           compile_arm test_dll_host.wl libtest_lib_export.so -o test_wl_host
           WL_OUTPUT=$(qemu-arm -L "$QEMU_ROOT" ./test_wl_host 2>&1)
           grep -Fq 'PASS:' <<< "$WL_OUTPUT"
-          echo "ARMv7 Python FFI is covered by native Linux jobs; C and White hosts cover the ARMv7 ABI."
+          echo "ARMv7 C and White FFI hosts passed. Python FFI was not run on ARMv7."
 
           tar -czf "$GITHUB_WORKSPACE/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C "$ARM_ENV" .
 
@@ -1620,6 +1671,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
+          PRERELEASE: ${{ needs.prepare-release.outputs.prerelease }}
         run: |
           shopt -s nullglob
           assets=(all_assets/*)
@@ -1629,7 +1681,7 @@ jobs:
           fi
 
           if ! gh release view "$TARGET_REF" -R ${{ github.repository }} >/dev/null 2>&1; then
-            gh release create "$TARGET_REF" -R ${{ github.repository }} --draft --title "White Language ${TARGET_REF#v}"
+            gh release create "$TARGET_REF" -R ${{ github.repository }} --draft --prerelease="$PRERELEASE" --latest=false --title "White Language ${TARGET_REF#v}"
           fi
           gh release upload "$TARGET_REF" -R ${{ github.repository }} "${assets[@]}" --clobber
 
@@ -1660,8 +1712,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REF: ${{ needs.prepare-release.outputs.release_tag }}
           VERSION_NO_V: ${{ needs.prepare-release.outputs.version }}
+          PRERELEASE: ${{ needs.prepare-release.outputs.prerelease }}
+          NATIVE_RESULT: ${{ needs.build-and-package.result }}
+          ARMV7_RESULT: ${{ needs.build-linux-armv7.result }}
+          BUILD_ARMV7: ${{ needs.prepare-release.outputs.build_armv7 }}
         run: |
           echo "complete=false" >> "$GITHUB_OUTPUT"
+          if [ "$NATIVE_RESULT" != success ] || { [ "$BUILD_ARMV7" = true ] && [ "$ARMV7_RESULT" != success ]; }; then
+            echo "::error::Assets were staged, but this build has failed or cancelled validation. Repair the failed platform before publishing."
+            exit 1
+          fi
           if ! gh release view "$TARGET_REF" -R ${{ github.repository }} >/dev/null 2>&1; then
             echo "::error::The release has no staged assets. Repair a failed platform and run again."
             exit 1
@@ -1693,7 +1753,8 @@ jobs:
             exit 1
           fi
 
-          gh release edit "$TARGET_REF" -R ${{ github.repository }} --draft=false --latest
+          if [ "$PRERELEASE" = true ]; then latest=false; else latest=true; fi
+          gh release edit "$TARGET_REF" -R ${{ github.repository }} --draft=false --prerelease="$PRERELEASE" --latest="$latest"
           echo "complete=true" >> "$GITHUB_OUTPUT"
 
   promote-to-r2:
@@ -1716,11 +1777,17 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+          PRERELEASE: ${{ needs.prepare-release.outputs.prerelease }}
         run: |
           TAG="${{ needs.prepare-release.outputs.release_tag }}"
           DOT_COUNT=$(echo $TAG | tr -cd '.' | wc -c)
 
-          if [ "$DOT_COUNT" -eq 1 ]; then
+          if [ "$PRERELEASE" = true ]; then
+            aws s3 sync all_assets/ "s3://${{ secrets.R2_BUCKET_NAME }}/preview/${TAG}/" \
+              --exclude "*Portable*" \
+              --delete \
+              --endpoint-url "${{ secrets.R2_ENDPOINT }}"
+          elif [ "$DOT_COUNT" -eq 1 ]; then
             aws s3 sync all_assets/ s3://${{ secrets.R2_BUCKET_NAME }}/${TAG}/ \
               --exclude "*Portable*" \
               --delete \
@@ -1742,7 +1809,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          TAG=$(gh release list -R ${{ github.repository }} --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '[.[] | select(.tagName | startswith("v") and (split("+")[0] | contains("-") | not))][0].tagName')
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
             echo "::error::No published release was found."
             exit 1

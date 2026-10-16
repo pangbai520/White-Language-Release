@@ -1,4 +1,4 @@
-name: White Language WIR Backend Validation
+name: White Language Backend Validation
 
 on:
   workflow_dispatch:
@@ -13,6 +13,7 @@ on:
         options:
           - llvm
           - wir
+          - machine
         default: llvm
 
 permissions:
@@ -31,13 +32,26 @@ jobs:
       target_tag: ${{ steps.release.outputs.target_tag }}
       target_commit: ${{ steps.release.outputs.target_commit }}
       bootstrap_tag: ${{ steps.release.outputs.bootstrap_tag }}
+      native_matrix: ${{ steps.release.outputs.native_matrix }}
     steps:
+      - name: Checkout validation scripts
+        uses: actions/checkout@v4
+
+      - name: Set up validation Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test release helpers
+        run: python .github/scripts/test_workflows.py -v
+
       - name: Resolve release to validate
         id: release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_TAG: ${{ inputs.release_tag }}
+          BACKEND: ${{ inputs.backend }}
         run: |
           set -euo pipefail
           TARGET_TAG="$REQUESTED_TAG"
@@ -54,6 +68,11 @@ jobs:
           echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
           echo "target_commit=$TARGET_COMMIT" >> "$GITHUB_OUTPUT"
           echo "bootstrap_tag=$BOOTSTRAP_TAG" >> "$GITHUB_OUTPUT"
+          matrix='[{"runner":"windows-latest","platform":"windows-x64","target_triple":"x86_64-pc-windows-msvc","archive_pattern":"WhiteLanguage-Windows-x64-Portable-*.zip","archive_kind":"zip","exe_suffix":".exe"},{"runner":"ubuntu-latest","platform":"linux-x64","target_triple":"x86_64-unknown-linux-gnu","archive_pattern":"whitelang-linux-x64-*.tar.gz","archive_kind":"tar","exe_suffix":""},{"runner":"ubuntu-24.04-arm","platform":"linux-arm64","target_triple":"aarch64-unknown-linux-gnu","archive_pattern":"whitelang-linux-arm64-*.tar.gz","archive_kind":"tar","exe_suffix":""},{"runner":"macos-15-intel","platform":"macos-x64","target_triple":"x86_64-apple-darwin","archive_pattern":"whitelang-macos-x64-*.tar.gz","archive_kind":"tar","exe_suffix":""},{"runner":"macos-14","platform":"macos-arm64","target_triple":"arm64-apple-darwin","archive_pattern":"whitelang-macos-arm64-*.tar.gz","archive_kind":"tar","exe_suffix":""}]'
+          if [ "$BACKEND" = machine ]; then
+            matrix=$(printf '%s' "$matrix" | jq -c '[.[] | select(.platform == "windows-x64" or .platform == "linux-x64")]')
+          fi
+          echo "native_matrix=$matrix" >> "$GITHUB_OUTPUT"
           {
             echo "### Validation release"
             echo ""
@@ -66,51 +85,26 @@ jobs:
     name: ${{ inputs.backend }}-${{ matrix.platform }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: windows-latest
-            platform: windows-x64
-            target_triple: x86_64-pc-windows-gnu
-            archive_pattern: WhiteLanguage-Windows-x64-Portable-*.zip
-            archive_kind: zip
-            exe_suffix: .exe
-          - runner: ubuntu-latest
-            platform: linux-x64
-            target_triple: x86_64-unknown-linux-gnu
-            archive_pattern: whitelang-linux-x64-*.tar.gz
-            archive_kind: tar
-            exe_suffix: ''
-          - runner: ubuntu-24.04-arm
-            platform: linux-arm64
-            target_triple: aarch64-unknown-linux-gnu
-            archive_pattern: whitelang-linux-arm64-*.tar.gz
-            archive_kind: tar
-            exe_suffix: ''
-          - runner: macos-15-intel
-            platform: macos-x64
-            target_triple: x86_64-apple-darwin
-            archive_pattern: whitelang-macos-x64-*.tar.gz
-            archive_kind: tar
-            exe_suffix: ''
-          - runner: macos-14
-            platform: macos-arm64
-            target_triple: aarch64-apple-darwin
-            archive_pattern: whitelang-macos-arm64-*.tar.gz
-            archive_kind: tar
-            exe_suffix: ''
+        include: ${{ fromJSON(needs.prepare.outputs.native_matrix) }}
 
     steps:
       - name: Checkout validation workflow
         uses: actions/checkout@v4
 
+      - name: Set up validation Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Checkout release source
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
-          ref: ${{ needs.prepare.outputs.target_tag }}
+          ref: ${{ needs.prepare.outputs.target_commit }}
           path: source_repo
           fetch-depth: 1
 
@@ -125,7 +119,7 @@ jobs:
           ARCHIVE_KIND: ${{ matrix.archive_kind }}
         run: |
           set -euo pipefail
-          mkdir -p artifacts bootstrap bootstrap_download current_env/std
+          mkdir -p artifacts bootstrap bootstrap_download
           : > artifacts/bootstrap.log
           : > artifacts/wir-build.log
           : > artifacts/test-output.log
@@ -136,8 +130,8 @@ jobs:
           ARCHIVE=$(find bootstrap_download -maxdepth 1 -type f | head -n 1)
           if [ -z "$ARCHIVE" ]; then echo "bootstrap asset was not downloaded" | tee -a artifacts/bootstrap.log; exit 1; fi
           if [ "$ARCHIVE_KIND" = zip ]; then unzip -q "$ARCHIVE" -d bootstrap; else tar -xzf "$ARCHIVE" -C bootstrap; fi
-          cp -a source_repo/std/. current_env/std/
-          if [ -d source_repo/runtime ]; then cp -a source_repo/runtime current_env/runtime; fi
+          cp -a source_repo/std/. bootstrap/std/
+          if [ -d source_repo/runtime ]; then cp -a source_repo/runtime/. bootstrap/runtime/; fi
           BOOTSTRAP_WLC="$PWD/bootstrap/bin/wlc${{ matrix.exe_suffix }}"
           if [ ! -f "$BOOTSTRAP_WLC" ]; then echo "bootstrap compiler is missing: $BOOTSTRAP_WLC" | tee -a artifacts/bootstrap.log; exit 1; fi
           chmod +x "$BOOTSTRAP_WLC" 2>/dev/null || true
@@ -159,7 +153,7 @@ jobs:
           set -euo pipefail
           START_TIME=$(date +%s)
           echo "$START_TIME" > artifacts/start-time
-          export WL_PATH="$PWD/current_env"
+          export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
@@ -170,17 +164,19 @@ jobs:
             echo "current_tag=$TARGET_TAG"
             echo "current_commit=$TARGET_COMMIT"
             echo "bootstrap_wlc_version=$BOOTSTRAP_TAG"
-            echo "generated_wlc_version=$TARGET_TAG"
+            echo "release_wlc_version=$TARGET_TAG"
             echo "backend=$BACKEND"
             echo "target_triple=$TARGET_TRIPLE"
             echo "clang_llvm_version=$LLVM_VERSION"
           } | tee -a artifacts/bootstrap.log
           WLC="$BOOTSTRAP_WLC"
           echo "Using the release compiler directly: $WLC" | tee artifacts/wir-build.log
-          printf 'success\n' > artifacts/bootstrap-build-status
+          printf 'not run (using published release compiler)\n' > artifacts/bootstrap-build-status
+          python .github/scripts/run-with-timeout.py 30 "$WLC" --version --verbose 2>&1 | tee artifacts/compiler-version.txt
           echo "wlc=$WLC" >> "$GITHUB_OUTPUT"
 
       - name: Validate WIR to LLVM IR path
+        if: inputs.backend != 'machine'
         timeout-minutes: 10
         shell: bash
         env:
@@ -188,18 +184,34 @@ jobs:
           BACKEND: ${{ inputs.backend }}
         run: |
           set -euo pipefail
-          export WL_PATH="$PWD/current_env"
+          export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           printf 'func main() -> Int { return 0; }\n' > artifacts/backend_probe.wl
           rm -f artifacts/backend_probe.ll
-          "$WLC" artifacts/backend_probe.wl "--backend=$BACKEND" -S --emit-llvm --keep-temps 2>&1 | tee artifacts/wir-to-llvm.log
+          python .github/scripts/run-with-timeout.py 180 "$WLC" artifacts/backend_probe.wl "--backend=$BACKEND" -S --emit-llvm --keep-temps 2>&1 | tee artifacts/wir-to-llvm.log
           IR=$(find artifacts -maxdepth 1 -type f -name 'backend_probe.ll' -print -quit)
           if [ -z "$IR" ]; then echo "WIR to LLVM IR did not produce backend_probe.ll" | tee -a artifacts/wir-to-llvm.log; exit 1; fi
           grep -Eq '^define |^; ModuleID' "$IR"
 
+      - name: Validate native machine output and self-bootstrap
+        if: inputs.backend == 'machine'
+        timeout-minutes: 75
+        shell: bash
+        env:
+          WLC: ${{ steps.compiler.outputs.wlc }}
+          EXE_SUFFIX: ${{ matrix.exe_suffix }}
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          python .github/scripts/validate-machine.py --wlc "$WLC" --source source_repo \
+            --std-root bootstrap --clang "$PWD/bootstrap/tools/llvm/bin/clang$EXE_SUFFIX" \
+            --artifacts artifacts --levels O0 O2 Oz
+
       - name: Run language, integration, memory, and diagnostics tests
+        if: inputs.backend != 'machine'
         timeout-minutes: 20
         shell: bash
         env:
@@ -208,7 +220,7 @@ jobs:
           EXE_SUFFIX: ${{ matrix.exe_suffix }}
         run: |
           set -u
-          export WL_PATH="$PWD/current_env"
+          export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
@@ -220,13 +232,25 @@ jobs:
             TEST_NAME=${TEST_FILE#source_repo/}
             TEST_BIN="$PWD/artifacts/test-bin$EXE_SUFFIX"
             rm -f "$TEST_BIN" "$PWD/artifacts/test-bin" "$PWD/artifacts/test-bin.exe"
-            printf '\n===== %s =====\n' "$TEST_NAME" >> artifacts/test-output.log
+            printf '\n===== %s =====\n' "$TEST_NAME" | tee -a artifacts/test-output.log
+            echo "[RUNNING] $TEST_NAME"
             set +e
-            "$WLC" "$TEST_FILE" "--backend=$BACKEND" -o "$TEST_BIN" >> artifacts/test-output.log 2>&1
-            BUILD_STATUS=$?
-            if [ "$BUILD_STATUS" -eq 0 ]; then "$TEST_BIN" >> artifacts/test-output.log 2>&1; RUN_STATUS=$?; else RUN_STATUS=1; fi
+            python .github/scripts/run-with-timeout.py 180 "$WLC" "$TEST_FILE" "--backend=$BACKEND" -o "$TEST_BIN" 2>&1 | tee -a artifacts/test-output.log
+            BUILD_STATUS=${PIPESTATUS[0]}
+            if [ "$BUILD_STATUS" -eq 0 ]; then
+              python .github/scripts/run-with-timeout.py 90 "$TEST_BIN" 2>&1 | tee artifacts/current-test.log | tee -a artifacts/test-output.log
+              RUN_STATUS=${PIPESTATUS[0]}
+            else
+              RUN_STATUS=1
+            fi
             set -e
-            if [ "$BUILD_STATUS" -eq 0 ] && [ "$RUN_STATUS" -eq 0 ]; then PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); fi
+            if [ "$BUILD_STATUS" -eq 0 ] && [ "$RUN_STATUS" -eq 0 ] && grep -Fq 'PASS:' artifacts/current-test.log; then
+              PASSED=$((PASSED + 1))
+              echo "[PASS] $TEST_NAME"
+            else
+              FAILED=$((FAILED + 1))
+              echo "[FAIL] $TEST_NAME (build=$BUILD_STATUS run=$RUN_STATUS)"
+            fi
           done < <(find source_repo/tests -type f -name '*.wl' ! -path '*/diagnostics/failures/*' ! -path '*/ffi/*' ! -path '*/fixtures/*' | sort)
 
           while IFS= read -r TEST_FILE; do
@@ -234,14 +258,21 @@ jobs:
             EXPECTED=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$TEST_FILE" | head -n 1)
             TEST_BIN="$PWD/artifacts/diagnostic-bin$EXE_SUFFIX"
             rm -f "$TEST_BIN" "$PWD/artifacts/diagnostic-bin" "$PWD/artifacts/diagnostic-bin.exe"
-            printf '\n===== %s =====\n' "$TEST_NAME" >> artifacts/test-output.log
+            printf '\n===== %s =====\n' "$TEST_NAME" | tee -a artifacts/test-output.log
+            echo "[RUNNING] diagnostic $TEST_NAME"
             set +e
-            OUTPUT=$("$WLC" "$TEST_FILE" "--backend=$BACKEND" -o "$TEST_BIN" 2>&1)
+            OUTPUT=$(python .github/scripts/run-with-timeout.py 180 "$WLC" "$TEST_FILE" "--backend=$BACKEND" -o "$TEST_BIN" 2>&1)
             STATUS=$?
-            if [ "$STATUS" -eq 0 ]; then RUN_OUTPUT=$("$TEST_BIN" 2>&1); STATUS=$?; OUTPUT="$OUTPUT"$'\n'"$RUN_OUTPUT"; fi
+            if [ "$STATUS" -eq 0 ]; then RUN_OUTPUT=$(python .github/scripts/run-with-timeout.py 90 "$TEST_BIN" 2>&1); STATUS=$?; OUTPUT="$OUTPUT"$'\n'"$RUN_OUTPUT"; fi
             set -e
-            printf '%s\n' "$OUTPUT" >> artifacts/test-output.log
-            if [ "$STATUS" -ne 0 ] && [ -n "$EXPECTED" ] && grep -Fq "$EXPECTED" <<< "$OUTPUT"; then PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); fi
+            printf '%s\n' "$OUTPUT" | tee -a artifacts/test-output.log
+            if [ "$STATUS" -ne 0 ] && [ "$STATUS" -ne 124 ] && [ "$STATUS" -ne 137 ] && [ -n "$EXPECTED" ] && grep -Fq "$EXPECTED" <<< "$OUTPUT"; then
+              PASSED=$((PASSED + 1))
+              echo "[PASS] diagnostic $TEST_NAME"
+            else
+              FAILED=$((FAILED + 1))
+              echo "[FAIL] diagnostic $TEST_NAME (status=$STATUS)"
+            fi
           done < <(find source_repo/tests/diagnostics/failures -type f -name '*.wl' | sort)
 
           printf '%s\n' "$PASSED" > artifacts/tests-passed
@@ -249,7 +280,7 @@ jobs:
           if [ "$FAILED" -ne 0 ]; then exit 1; fi
 
       - name: Run FFI tests
-        if: always() && steps.compiler.outcome == 'success'
+        if: always() && steps.compiler.outcome == 'success' && inputs.backend != 'machine'
         timeout-minutes: 10
         shell: bash
         env:
@@ -259,33 +290,40 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           set -u
-          export WL_PATH="$PWD/current_env"
+          export WL_PATH="$PWD/bootstrap"
           export PATH="$PWD/bootstrap/tools/llvm/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export DYLD_LIBRARY_PATH="$PWD/bootstrap/tools/llvm/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           CLANG="$PWD/bootstrap/tools/llvm/bin/clang$EXE_SUFFIX"
           FFI_DIR="$PWD/source_repo/tests/integration/ffi"
+          run_ffi() { python "$GITHUB_WORKSPACE/.github/scripts/run-with-timeout.py" 180 "$@"; }
           PASSED=$(cat artifacts/tests-passed)
           FAILED=$(cat artifacts/tests-failed)
           cd "$FFI_DIR"
           rm -f test_lib_export.dll test_lib_export.lib test_lib_export.exp test_lib_export.so libtest_lib_export.so libtest_lib_export.dylib test_c_host test_c_host.exe test_wl_host test_wl_host.exe
           set +e
-          "$WLC" test_lib_export.wl "--backend=$BACKEND" --shared >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+          run_ffi "$WLC" test_lib_export.wl "--backend=$BACKEND" --shared >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
           STATUS=$?
           if [ "$STATUS" -eq 0 ] && [[ "$PLATFORM" == windows-* ]]; then
-            "$CLANG" test_dll_host.c test_lib_export.lib -o test_c_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && ./test_c_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+            run_ffi "$CLANG" --target=x86_64-w64-windows-gnu "$GITHUB_WORKSPACE/.github/scripts/windows-ffi-host.c" test_lib_export.lib -nostdlib -lkernel32 -Wl,--entry,mainCRTStartup -Wl,--subsystem,console -o test_c_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && run_ffi ./test_c_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
             STATUS=$?
-            [ "$STATUS" -eq 0 ] && "$WLC" test_dll_host.wl test_lib_export.lib "--backend=$BACKEND" -o test_wl_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && ./test_wl_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+            [ "$STATUS" -eq 0 ] && run_ffi "$WLC" test_dll_host.wl test_lib_export.lib "--backend=$BACKEND" -o test_wl_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && run_ffi ./test_wl_host.exe >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
             STATUS=$?
           elif [ "$STATUS" -eq 0 ] && [[ "$PLATFORM" == macos-* ]]; then
-            "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,@loader_path -o test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && ./test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+            run_ffi "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,@loader_path -o test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && run_ffi ./test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
             STATUS=$?
-            [ "$STATUS" -eq 0 ] && "$WLC" test_dll_host.wl libtest_lib_export.dylib "--backend=$BACKEND" -o test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && ./test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+            [ "$STATUS" -eq 0 ] && run_ffi "$WLC" test_dll_host.wl libtest_lib_export.dylib "--backend=$BACKEND" -o test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && run_ffi ./test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
             STATUS=$?
           elif [ "$STATUS" -eq 0 ]; then
-            "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && LD_LIBRARY_PATH="$PWD" ./test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+            run_ffi "$CLANG" test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && LD_LIBRARY_PATH="$PWD" run_ffi ./test_c_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
             STATUS=$?
-            [ "$STATUS" -eq 0 ] && "$WLC" test_dll_host.wl libtest_lib_export.so "--backend=$BACKEND" -o test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && LD_LIBRARY_PATH="$PWD" ./test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+            [ "$STATUS" -eq 0 ] && run_ffi "$WLC" test_dll_host.wl libtest_lib_export.so "--backend=$BACKEND" -o test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1 && LD_LIBRARY_PATH="$PWD" run_ffi ./test_wl_host >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
+            STATUS=$?
+          fi
+          if [ "$STATUS" -eq 0 ]; then
+            if [[ "$PLATFORM" == macos-* ]]; then cp libtest_lib_export.dylib test_lib_export.so; fi
+            if [[ "$PLATFORM" == linux-* ]]; then cp libtest_lib_export.so test_lib_export.so; fi
+            run_ffi python test_dll_host.py >> "$GITHUB_WORKSPACE/artifacts/ffi-output.log" 2>&1
             STATUS=$?
           fi
           set -e
@@ -322,12 +360,12 @@ jobs:
             echo "| Current tag | \`$TARGET_TAG\` |"
             echo "| Current commit | \`$TARGET_COMMIT\` |"
             echo "| Bootstrap wlc | \`$BOOTSTRAP_TAG\` |"
-            echo "| Generated wlc | \`$TARGET_TAG\` |"
+            echo "| Release compiler | \`$TARGET_TAG\` |"
             echo "| Backend | \`$BACKEND\` |"
             echo "| Target triple | \`$TARGET_TRIPLE\` |"
             echo "| Clang/LLVM | $LLVM_VERSION |"
-            echo "| Bootstrap | $BOOTSTRAP_RESULT |"
-            echo "| Backend build | $BACKEND_RESULT |"
+            echo "| Self-bootstrap | $BOOTSTRAP_RESULT |"
+            echo "| Compiler setup | $BACKEND_RESULT |"
             echo "| Tests passed | $PASSED |"
             echo "| Tests failed | $FAILED |"
             echo "| Elapsed | ${ELAPSED}s |"
@@ -353,6 +391,7 @@ jobs:
   wir-linux-armv7:
     name: ${{ inputs.backend }}-linux-armv7
     needs: prepare
+    if: inputs.backend != 'machine'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -363,7 +402,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
-          ref: ${{ needs.prepare.outputs.target_tag }}
+          ref: ${{ needs.prepare.outputs.target_commit }}
           path: source_repo
           fetch-depth: 1
 
@@ -381,7 +420,7 @@ jobs:
           BOOTSTRAP_TAG: ${{ needs.prepare.outputs.bootstrap_tag }}
         run: |
           set -euo pipefail
-          mkdir -p artifacts bootstrap bootstrap_download current_env/std
+          mkdir -p artifacts bootstrap bootstrap_download
           : > artifacts/bootstrap.log
           : > artifacts/wir-build.log
           : > artifacts/test-output.log
@@ -390,10 +429,10 @@ jobs:
           printf '0\n' > artifacts/tests-failed
           gh release download "$BOOTSTRAP_TAG" -R "$GITHUB_REPOSITORY" --pattern 'whitelang-linux-armv7-*.tar.gz' --dir bootstrap_download --clobber 2>&1 | tee artifacts/bootstrap.log
           tar -xzf "$(find bootstrap_download -maxdepth 1 -type f | head -n 1)" -C bootstrap
-          cp -a source_repo/std/. current_env/std/
-          if [ -d source_repo/runtime ]; then cp -a source_repo/runtime current_env/runtime; fi
+          cp -a source_repo/std/. bootstrap/std/
+          if [ -d source_repo/runtime ]; then cp -a source_repo/runtime/. bootstrap/runtime/; fi
 
-      - name: Bootstrap and validate ARMv7
+      - name: Validate released ARMv7 compiler
         id: compiler
         timeout-minutes: 70
         shell: bash
@@ -409,7 +448,7 @@ jobs:
           set -eu
           apt-get update >/dev/null
           apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev python3 >/dev/null
-          export WL_PATH=/workspace/current_env
+          export WL_PATH=/workspace/bootstrap
           export PATH=/workspace/bootstrap/tools/llvm/bin:$PATH
           export LD_LIBRARY_PATH=/workspace/bootstrap/tools/llvm/lib
           bootstrap=/workspace/bootstrap/bin/wlc
@@ -419,7 +458,7 @@ jobs:
           /workspace/bootstrap/tools/llvm/bin/clang --version
           /workspace/bootstrap/tools/llvm/bin/clang --version 2>&1 | head -n 1 > /workspace/artifacts/llvm-version
           echo "Using the release compiler directly: $wlc" | tee /workspace/artifacts/wir-build.log
-          printf 'success\n' > /workspace/artifacts/bootstrap-build-status
+          printf 'not run (using published release compiler)\n' > /workspace/artifacts/bootstrap-build-status
           printf 'func main() -> Int { return 0; }\n' > /workspace/artifacts/backend_probe.wl
           timeout 300s "$wlc" /workspace/artifacts/backend_probe.wl "--backend=$backend" -S --emit-llvm --keep-temps 2>&1 | tee /workspace/artifacts/wir-to-llvm.log
           test -s /workspace/artifacts/backend_probe.ll
@@ -430,21 +469,52 @@ jobs:
           find source_repo/tests -type f -name '*.wl' ! -path '*/diagnostics/failures/*' ! -path '*/ffi/*' ! -path '*/fixtures/*' | sort > /workspace/artifacts/positive-tests.txt
           while IFS= read -r test_file; do
             rm -f /workspace/artifacts/test-bin
+            : > /workspace/artifacts/current-test.log
             printf '\n===== %s =====\n' "$test_file" >> /workspace/artifacts/test-output.log
-            if timeout 180s "$wlc" "$test_file" "--backend=$backend" -o /workspace/artifacts/test-bin >> /workspace/artifacts/test-output.log 2>&1 && timeout 90s /workspace/artifacts/test-bin >> /workspace/artifacts/test-output.log 2>&1; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+            echo "[RUNNING] $test_file"
+            if timeout 180s "$wlc" "$test_file" "--backend=$backend" -o /workspace/artifacts/test-bin >> /workspace/artifacts/test-output.log 2>&1 && timeout 90s /workspace/artifacts/test-bin > /workspace/artifacts/current-test.log 2>&1 && grep -Fq 'PASS:' /workspace/artifacts/current-test.log; then
+              passed=$((passed + 1))
+              echo "[PASS] $test_file"
+            else
+              failed=$((failed + 1))
+              echo "[FAIL] $test_file"
+            fi
+            cat /workspace/artifacts/current-test.log >> /workspace/artifacts/test-output.log 2>/dev/null || true
           done < /workspace/artifacts/positive-tests.txt
 
           find source_repo/tests/diagnostics/failures -type f -name '*.wl' | sort > /workspace/artifacts/diagnostic-tests.txt
           while IFS= read -r test_file; do
             expected=$(sed -n 's|^// Expected Error: "\(.*\)"[[:space:]]*$|\1|p' "$test_file" | head -n 1)
+            echo "[RUNNING] diagnostic $test_file"
+            rm -f /workspace/artifacts/diagnostic-bin
             output=$(timeout 180s "$wlc" "$test_file" "--backend=$backend" -o /workspace/artifacts/diagnostic-bin 2>&1) && status=0 || status=$?
+            if [ "$status" -eq 0 ]; then
+              run_output=$(timeout 90s /workspace/artifacts/diagnostic-bin 2>&1) && status=0 || status=$?
+              output=$(printf '%s\n%s' "$output" "$run_output")
+            fi
             printf '\n===== %s =====\n%s\n' "$test_file" "$output" >> /workspace/artifacts/test-output.log
-            if [ "$status" -ne 0 ] && [ -n "$expected" ] && printf '%s\n' "$output" | grep -Fq "$expected"; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+            if [ "$status" -ne 0 ] && [ "$status" -ne 124 ] && [ "$status" -ne 137 ] && [ -n "$expected" ] && printf '%s\n' "$output" | grep -Fq "$expected"; then
+              passed=$((passed + 1))
+              echo "[PASS] diagnostic $test_file"
+            else
+              failed=$((failed + 1))
+              echo "[FAIL] diagnostic $test_file (status=$status)"
+            fi
           done < /workspace/artifacts/diagnostic-tests.txt
 
           cd source_repo/tests/integration/ffi
           rm -f libtest_lib_export.so test_lib_export.so test_c_host test_wl_host
-          if "$wlc" test_lib_export.wl "--backend=$backend" --shared >> /workspace/artifacts/ffi-output.log 2>&1 && gcc test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 && ./test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 && "$wlc" test_dll_host.wl libtest_lib_export.so "--backend=$backend" -o test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1 && ./test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+          if timeout 180s "$wlc" test_lib_export.wl "--backend=$backend" --shared >> /workspace/artifacts/ffi-output.log 2>&1 &&
+             timeout 180s gcc test_dll_host.c -L. -ltest_lib_export -Wl,-rpath,'$ORIGIN' -o test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 &&
+             timeout 90s ./test_c_host >> /workspace/artifacts/ffi-output.log 2>&1 &&
+             timeout 180s "$wlc" test_dll_host.wl libtest_lib_export.so "--backend=$backend" -o test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1 &&
+             LD_LIBRARY_PATH="$PWD" timeout 90s ./test_wl_host >> /workspace/artifacts/ffi-output.log 2>&1 &&
+             cp libtest_lib_export.so test_lib_export.so &&
+             timeout 90s python3 test_dll_host.py >> /workspace/artifacts/ffi-output.log 2>&1; then
+            passed=$((passed + 1))
+          else
+            failed=$((failed + 1))
+          fi
           printf '%s\n' "$passed" > /workspace/artifacts/tests-passed
           printf '%s\n' "$failed" > /workspace/artifacts/tests-failed
           [ "$failed" -eq 0 ]
@@ -475,12 +545,12 @@ jobs:
             echo "| Current tag | \`$TARGET_TAG\` |"
             echo "| Current commit | \`$TARGET_COMMIT\` |"
             echo "| Bootstrap wlc | \`$BOOTSTRAP_TAG\` |"
-            echo "| Generated wlc | \`$TARGET_TAG\` |"
+            echo "| Release compiler | \`$TARGET_TAG\` |"
             echo "| Backend | \`$BACKEND\` |"
             echo "| Target triple | \`armv7-unknown-linux-gnueabihf\` |"
             echo "| Clang/LLVM | $LLVM_VERSION |"
-            echo "| Bootstrap | $BOOTSTRAP_RESULT |"
-            echo "| Backend build | $BACKEND_RESULT |"
+            echo "| Self-bootstrap | $BOOTSTRAP_RESULT |"
+            echo "| Validation step | $BACKEND_RESULT |"
             echo "| Tests passed | $PASSED |"
             echo "| Tests failed | $FAILED |"
             echo "| Elapsed | ${ELAPSED}s |"
