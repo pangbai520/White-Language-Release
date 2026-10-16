@@ -15,6 +15,9 @@ def main():
     process = subprocess.Popen(args, **options)
     try:
         status = process.wait(timeout=seconds)
+        if status:
+            print(f"Command exited with status {status} (0x{status & 0xffffffff:08X}): {args[0]}",
+                  file=sys.stderr, flush=True)
         return status if status >= 0 else 128 - status
     except subprocess.TimeoutExpired:
         print(f"Timed out after {seconds:g}s: {args[0]}", file=sys.stderr, flush=True)

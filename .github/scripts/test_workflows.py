@@ -28,6 +28,7 @@ plan = load("bootstrap-plan")
 machine = load("validate-machine")
 macos_lld = load("macos-lld")
 workspace = load("bootstrap-workspace")
+checkpoint = load("compiler-checkpoint")
 
 
 def bash_program():
@@ -536,6 +537,82 @@ class Diagnostics(unittest.TestCase):
         with patch.object(self.validation, "command", return_value=(0, "Build success")):
             with self.assertRaisesRegex(AssertionError, "without an executable"):
                 self.validation.diagnostic(self.source, "-O0")
+
+
+class CompilerCheckpoint(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="white-checkpoint-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.package = self.root / "package"
+        self.cache = self.root / "cache"
+        (self.package / "bin").mkdir(parents=True)
+        (self.package / "std/builtin").mkdir(parents=True)
+        (self.package / "tools").mkdir()
+        (self.package / "bin/wlc").write_bytes(b"compiler")
+        (self.package / "std/builtin/_pkg.wl").write_bytes(b"library")
+        (self.package / "tools/keep").write_bytes(b"checked toolchain")
+        self.identity = checkpoint.identity("1" * 40, "linux-x64", "v0.3.8-alpha1")
+
+    def save(self):
+        checkpoint.save(self.package, self.cache, self.identity)
+
+    def test_round_trip_excludes_the_toolchain(self):
+        self.save()
+        restored = self.root / "restored"
+        checkpoint.restore(restored, self.cache, self.identity)
+        self.assertEqual((restored / "bin/wlc").read_bytes(), b"compiler")
+        self.assertFalse((restored / "tools").exists())
+        self.assertFalse((self.cache / "tools").exists())
+
+    def test_different_source_platform_or_version_cannot_be_reused(self):
+        self.save()
+        for key in ("commit", "platform", "version"):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                checkpoint.restore(self.package, self.cache, dict(self.identity, **{key: "different"}))
+
+    def test_changed_binary_is_rejected_before_copying(self):
+        self.save()
+        (self.cache / "bin/wlc").write_bytes(b"damaged")
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            checkpoint.restore(self.root / "restored", self.cache, self.identity)
+        self.assertFalse((self.root / "restored").exists())
+
+    def test_missing_or_extra_library_is_rejected(self):
+        self.save()
+        (self.cache / "std/extra.wl").touch()
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            checkpoint.restore(self.package, self.cache, self.identity)
+
+    def test_path_traversal_is_rejected(self):
+        self.save()
+        manifest = self.cache / "build.json"
+        metadata = json.loads(manifest.read_text())
+        metadata["files"]["bin/../../outside"] = "0" * 64
+        manifest.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, "Invalid checkpoint path"):
+            checkpoint.restore(self.package, self.cache, self.identity)
+
+    def test_existing_checkpoint_is_not_overwritten(self):
+        self.save()
+        with self.assertRaisesRegex(ValueError, "overwrite"):
+            self.save()
+
+    def test_incomplete_package_is_not_saved(self):
+        (self.package / "bin/wlc").unlink()
+        with self.assertRaisesRegex(ValueError, "no compiler"):
+            self.save()
+        self.assertFalse(self.cache.exists())
+
+    def test_checkpoint_is_saved_before_ffi_and_positive_tests(self):
+        workflow = (SCRIPTS.parent / "workflows/release.yml").read_text(encoding="utf-8")
+        saved = workflow.index('      - name: Cache the completed compiler')
+        self.assertLess(saved, workflow.index('      - name: "[Windows] Prepare C FFI host"'))
+        self.assertLess(saved, workflow.index('      - name: Run language, integration'))
+        self.assertEqual(workflow.count("&& steps.restore-compiler.outputs.cache-hit != 'true'"), 2)
+        self.assertIn("      - name: Store bootstrap snapshots\n        if: always()", workflow)
+        self.assertLess(workflow.index('      - name: "[Windows x32] Configure the target linker"'),
+                        workflow.index('      - name: Restore completed compiler bootstrap'))
 
 
 if __name__ == "__main__":

@@ -441,7 +441,7 @@ jobs:
 
       - name: "[macOS] Build the missing LLD from matching LLVM sources"
         if: startsWith(matrix.os_name, 'macos') && steps.macos-lld.outputs.needed == 'true' && steps.restore-macos-lld.outputs.cache-hit != 'true'
-        timeout-minutes: 60
+        timeout-minutes: 120
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -487,8 +487,30 @@ jobs:
           path: .macos-lld
           key: ${{ steps.restore-macos-lld.outputs.cache-primary-key }}
 
+      - name: "[Windows x32] Configure the target linker"
+        if: matrix.os_name == 'windows-x32'
+        shell: bash
+        run: |
+          LLVM_HOME=release_pkg/tools/llvm
+          printf '%s\n' '-fuse-ld=lld' '-L<CFGDIR>/../i686-w64-mingw32/lib' > "$LLVM_HOME/bin/i686-pc-windows-msvc.cfg"
+          cp "$LLVM_HOME/bin/i686-pc-windows-msvc.cfg" "$LLVM_HOME/bin/i686-pc-windows-msvc-clang.cfg"
+
+      - name: Restore completed compiler bootstrap
+        id: restore-compiler
+        uses: actions/cache/restore@v4
+        with:
+          path: .bootstrap-checkpoint
+          key: bootstrap-v1-${{ matrix.os_name }}-${{ env.TARGET_REF }}-${{ env.TARGET_COMMIT }}-${{ hashFiles('.github/scripts/compiler-checkpoint.py') }}
+
+      - name: Check the restored compiler
+        if: steps.restore-compiler.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          python .github/scripts/compiler-checkpoint.py restore --package release_pkg --checkpoint .bootstrap-checkpoint \
+            --commit "$TARGET_COMMIT" --platform "${{ matrix.os_name }}" --version "$TARGET_REF"
+
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
-        if: startsWith(matrix.os_name, 'windows')
+        if: startsWith(matrix.os_name, 'windows') && steps.restore-compiler.outputs.cache-hit != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -701,10 +723,11 @@ jobs:
               SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
               cd ../build_${SHORT_SHA}
               if [ -d runtime ]; then
-                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip bin std runtime > /dev/null
+                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip.part bin std runtime > /dev/null
               else
-                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip bin std > /dev/null
+                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip.part bin std > /dev/null
               fi
+              mv ../Output_Snapshots/${SNAP_NAME}.zip.part ../Output_Snapshots/${SNAP_NAME}.zip
               cd ../source_repo
             fi
             python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" retire --root "$GITHUB_WORKSPACE" --env "$PREVIOUS_ENV" --active "$ACTIVE_ENV"
@@ -783,7 +806,7 @@ jobs:
           fi
 
       - name: "[Unix] Bootstrap Compiler & Build Runtime"
-        if: startsWith(matrix.os_name, 'windows') == false
+        if: startsWith(matrix.os_name, 'windows') == false && steps.restore-compiler.outputs.cache-hit != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -990,10 +1013,11 @@ jobs:
               SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
               cd ../build_${SHORT_SHA}
               if [ -d runtime ]; then
-                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz bin std runtime
+                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz.part bin std runtime
               else
-                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz bin std
+                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz.part bin std
               fi
+              mv ../Output_Snapshots/${SNAP_NAME}.tar.gz.part ../Output_Snapshots/${SNAP_NAME}.tar.gz
               cd ../source_repo
             fi
             python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" retire --root "$GITHUB_WORKSPACE" --env "$PREVIOUS_ENV" --active "$ACTIVE_ENV"
@@ -1072,6 +1096,28 @@ jobs:
             echo "No native C runtime in this release; determinism check skipped."
             rm -rf ../release_pkg/runtime
           fi
+
+      - name: Keep the completed bootstrap before testing
+        if: steps.restore-compiler.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          python .github/scripts/compiler-checkpoint.py save --package release_pkg --checkpoint .bootstrap-checkpoint \
+            --commit "$TARGET_COMMIT" --platform "${{ matrix.os_name }}" --version "$TARGET_REF"
+
+      - name: Cache the completed compiler
+        if: steps.restore-compiler.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .bootstrap-checkpoint
+          key: ${{ steps.restore-compiler.outputs.cache-primary-key }}
+
+      - name: Store compiler checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-${{ matrix.os_name }}
+          path: .bootstrap-checkpoint/
+          include-hidden-files: true
+          retention-days: 7
 
       - name: "[Windows] Prepare C FFI host"
         if: startsWith(matrix.os_name, 'windows')
@@ -1203,6 +1249,7 @@ jobs:
             set -e
             if [ $STATUS -ne 0 ] || ! grep -Fq "PASS:" <<< "$OUTPUT"; then
               echo "::error file=$file::Test Logic Failed"
+              echo "Program exit status: $STATUS"
               echo "Output: $OUTPUT"
               FAILED_FILES+=("[Runtime Error] $file")
               ERRORS=$((ERRORS+1))
@@ -1452,10 +1499,13 @@ jobs:
           retention-days: 7
 
       - name: Store bootstrap snapshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: snapshots-${{ matrix.os_name }}
-          path: Output_Snapshots/
+          path: |
+            Output_Snapshots/*.zip
+            Output_Snapshots/*.tar.gz
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1693,10 +1743,13 @@ jobs:
           retention-days: 7
 
       - name: Store ARMv7 bootstrap snapshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: snapshots-linux-armv7
-          path: Output_Snapshots/
+          path: |
+            Output_Snapshots/*.zip
+            Output_Snapshots/*.tar.gz
           if-no-files-found: ignore
           retention-days: 7
 

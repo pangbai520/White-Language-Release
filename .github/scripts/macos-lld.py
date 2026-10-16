@@ -61,8 +61,8 @@ def configure(source, build):
     if shutil.which("ninja"):
         args += ["-G", "Ninja"]
     args += [
-        "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_FLAGS_RELEASE=-O2 -DNDEBUG",
-        "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG",
+        "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_FLAGS_RELEASE=-O1 -DNDEBUG",
+        "-DCMAKE_CXX_FLAGS_RELEASE=-O1 -DNDEBUG",
         "-DCMAKE_C_COMPILER=" + run(["xcrun", "--find", "clang"]).strip(),
         "-DCMAKE_CXX_COMPILER=" + run(["xcrun", "--find", "clang++"]).strip(),
         "-DCMAKE_OSX_SYSROOT=" + run(["xcrun", "--show-sdk-path"]).strip(),
