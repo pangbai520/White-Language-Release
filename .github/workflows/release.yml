@@ -289,6 +289,7 @@ jobs:
           mkdir -p release_pkg/tools/llvm/bin
           mkdir -p Output Output_Snapshots
           mkdir -p release_pkg/std
+          python .github/scripts/bootstrap-workspace.py report --root "$GITHUB_WORKSPACE"
 
       - name: Restore previous target toolchain
         if: matrix.reuse_toolchain == true
@@ -361,6 +362,7 @@ jobs:
           rm -rf release_pkg/tools/llvm
           mv "$LLVM_ROOT" release_pkg/tools/llvm
           rm -rf llvm_full
+          rm -f ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}"
 
       - name: "[Unix] Stage LLVM toolchain"
         if: startsWith(matrix.os_name, 'windows') == false && matrix.reuse_toolchain != true
@@ -416,6 +418,47 @@ jobs:
           fi
           rm -rf llvm_full
 
+      - name: Release the extracted LLVM archive
+        if: startsWith(matrix.os_name, 'windows') == false && matrix.reuse_toolchain != true
+        shell: bash
+        run: rm -f ".llvm-cache/${{ matrix.os_name }}/${{ matrix.archive_name }}"
+
+      - name: "[macOS] Inspect the packaged linker"
+        if: startsWith(matrix.os_name, 'macos')
+        id: macos-lld
+        shell: bash
+        run: |
+          unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+          python .github/scripts/macos-lld.py inspect --llvm release_pkg/tools/llvm --github-output "$GITHUB_OUTPUT"
+
+      - name: "[macOS] Restore matching LLD"
+        if: startsWith(matrix.os_name, 'macos') && steps.macos-lld.outputs.needed == 'true'
+        id: restore-macos-lld
+        uses: actions/cache/restore@v4
+        with:
+          path: .macos-lld
+          key: macos-lld-v1-${{ matrix.os_name }}-${{ steps.macos-lld.outputs.version }}-${{ hashFiles('.github/scripts/macos-lld.py') }}
+
+      - name: "[macOS] Build the missing LLD from matching LLVM sources"
+        if: startsWith(matrix.os_name, 'macos') && steps.macos-lld.outputs.needed == 'true' && steps.restore-macos-lld.outputs.cache-hit != 'true'
+        timeout-minutes: 60
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLVM_VERSION: ${{ steps.macos-lld.outputs.version }}
+        run: |
+          unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+          python .github/scripts/macos-lld.py build --version "$LLVM_VERSION" --cache .macos-lld
+
+      - name: "[macOS] Add matching LLD to the release toolchain"
+        if: startsWith(matrix.os_name, 'macos') && steps.macos-lld.outputs.needed == 'true'
+        shell: bash
+        env:
+          LLVM_VERSION: ${{ steps.macos-lld.outputs.version }}
+        run: |
+          unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH
+          python .github/scripts/macos-lld.py install --llvm release_pkg/tools/llvm --cache .macos-lld --version "$LLVM_VERSION"
+
       - name: "[macOS] Configure and check the packaged Clang and LLD"
         if: startsWith(matrix.os_name, 'macos')
         timeout-minutes: 5
@@ -437,6 +480,13 @@ jobs:
           "$probe/main"
           "$CLANG" "$probe/main.ll" -dynamiclib -o "$probe/library.dylib"
 
+      - name: "[macOS] Cache the checked LLD"
+        if: startsWith(matrix.os_name, 'macos') && steps.macos-lld.outputs.needed == 'true' && steps.restore-macos-lld.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .macos-lld
+          key: ${{ steps.restore-macos-lld.outputs.cache-primary-key }}
+
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows')
         shell: bash
@@ -454,6 +504,7 @@ jobs:
           echo "Bootstrapping from previous release: $PREV_TAG"
           gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-*.zip" --dir boot_dl --clobber
           unzip -q boot_dl/*.zip -d boot_env
+          rm -f boot_dl/*.zip
 
           if [ "${{ matrix.os_name }}" == "windows-x32" ]; then
             for LLVM_HOME in release_pkg/tools/llvm boot_env/tools/llvm; do
@@ -534,6 +585,8 @@ jobs:
             if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
               stamp_release_metadata
             fi
+            PREVIOUS_ENV="$ACTIVE_ENV"
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" report --root "$GITHUB_WORKSPACE" --minimum-free-mib 2048
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
             rm -rf "$ACTIVE_ENV/runtime_backup"
             if [ -d "$ACTIVE_ENV/runtime" ]; then cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"; fi
@@ -549,7 +602,7 @@ jobs:
 
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std
-            cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" attach --root "$GITHUB_WORKSPACE" --env "../build_${SHORT_SHA}"
 
             ICON_ARG=""
             if [ -n "$ICON_PATH_ABS" ]; then
@@ -654,6 +707,8 @@ jobs:
               fi
               cd ../source_repo
             fi
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" retire --root "$GITHUB_WORKSPACE" --env "$PREVIOUS_ENV" --active "$ACTIVE_ENV"
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" report --root "$GITHUB_WORKSPACE"
           done
           git checkout ${{ env.TARGET_REF }}
           stamp_release_metadata
@@ -746,12 +801,12 @@ jobs:
             gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "whitelang-${{ matrix.os_name }}-*.tar.gz" --dir boot_dl --clobber
             tar -xzf boot_dl/*.tar.gz -C boot_env
           fi
+          rm -f boot_dl/*.tar.gz
 
           if [[ "${{ matrix.os_name }}" == macos-* ]]; then
             # Every generation must use the checked compiler/linker pair,
             # including Stage 1 driven by the previous release compiler.
-            rm -rf boot_env/tools
-            cp -a release_pkg/tools boot_env/tools
+            python .github/scripts/bootstrap-workspace.py attach --root "$GITHUB_WORKSPACE" --env boot_env
           fi
 
           cd source_repo
@@ -824,6 +879,8 @@ jobs:
               stamp_release_metadata
             fi
 
+            PREVIOUS_ENV="$ACTIVE_ENV"
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" report --root "$GITHUB_WORKSPACE" --minimum-free-mib 2048
             cp -a "$ACTIVE_ENV/std" "$ACTIVE_ENV/std_backup"
             rm -rf "$ACTIVE_ENV/runtime_backup"
             if [ -d "$ACTIVE_ENV/runtime" ]; then cp -a "$ACTIVE_ENV/runtime" "$ACTIVE_ENV/runtime_backup"; fi
@@ -839,7 +896,7 @@ jobs:
 
             export WL_PATH="$ACTIVE_ENV"
             mkdir -p ../build_${SHORT_SHA}/bin ../build_${SHORT_SHA}/std
-            cp -r ../release_pkg/tools ../build_${SHORT_SHA}/
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" attach --root "$GITHUB_WORKSPACE" --env "../build_${SHORT_SHA}"
 
             apply_env() {
               rm -rf "$ACTIVE_ENV/std" "$ACTIVE_ENV/runtime/wl_runtime.o"
@@ -939,6 +996,8 @@ jobs:
               fi
               cd ../source_repo
             fi
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" retire --root "$GITHUB_WORKSPACE" --env "$PREVIOUS_ENV" --active "$ACTIVE_ENV"
+            python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" report --root "$GITHUB_WORKSPACE"
           done
           git checkout ${{ env.TARGET_REF }}
           stamp_release_metadata
