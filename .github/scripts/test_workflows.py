@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,6 +25,16 @@ def load(name):
 
 plan = load("bootstrap-plan")
 machine = load("validate-machine")
+
+
+def bash_program():
+    bash = shutil.which("bash")
+    if sys.platform == "win32":
+        for parent in Path(shutil.which("git")).parents:
+            candidate = parent / "bin/bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return bash
 
 
 class History(unittest.TestCase):
@@ -121,13 +132,7 @@ class History(unittest.TestCase):
         self.assertEqual(result.stdout, (final + "\n").encode("ascii"))
 
     def test_bootstrap_loops_accept_crlf_and_reject_bad_revisions(self):
-        bash = shutil.which("bash")
-        if sys.platform == "win32":
-            for parent in Path(shutil.which("git")).parents:
-                candidate = parent / "bin/bash.exe"
-                if candidate.is_file():
-                    bash = str(candidate)
-                    break
+        bash = bash_program()
         if not bash:
             self.skipTest("Bash is unavailable")
         workflow = (SCRIPTS.parent / "workflows/release.yml").read_text(encoding="utf-8")
@@ -147,6 +152,43 @@ class History(unittest.TestCase):
                                     cwd=self.repo, env={**os.environ, "TEST_COMMITS": "not-a-commit\r\n"}, timeout=15)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"Invalid bootstrap commit", result.stdout)
+
+    def select_targets(self, event="workflow_dispatch", tag="v0.3.8-alpha1"):
+        bash = bash_program()
+        if not bash:
+            self.skipTest("Bash is unavailable")
+        workflow = (SCRIPTS.parent / "workflows/release.yml").read_text(encoding="utf-8")
+        match = re.search(r'      - name: Select build targets\n.*?        run: \|\n(.*?)(?=\n      - name:)',
+                          workflow, re.DOTALL)
+        self.assertIsNotNone(match)
+        output = self.repo / ("outputs-" + event)
+        env = dict(os.environ, GITHUB_EVENT_NAME=event, GITHUB_REF="refs/tags/" + tag,
+                   GITHUB_REF_NAME=tag, REQUESTED_OPERATION="repair", REQUESTED_TAG=tag,
+                   REQUESTED_PLATFORM="all", GITHUB_OUTPUT=output.as_posix())
+        result = subprocess.run([bash, "-e", "-s"], input=textwrap.dedent(match.group(1)).encode(),
+                                env=env, cwd=self.repo, capture_output=True, timeout=15)
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
+        return result, values
+
+    def test_all_repair_matches_a_full_tag_build(self):
+        repair, repaired = self.select_targets()
+        push, tagged = self.select_targets(event="push")
+        self.assertEqual(repair.returncode, 0, repair.stderr.decode(errors="replace"))
+        self.assertEqual(push.returncode, 0, push.stderr.decode(errors="replace"))
+        self.assertEqual(repaired, tagged)
+        platforms = {target["os_name"] for target in json.loads(repaired["matrix"])}
+        self.assertEqual(platforms, {"windows-x64", "windows-x32", "macos-x64", "macos-arm64",
+                                    "linux-x64", "linux-x86", "linux-arm64"})
+        self.assertEqual(repaired["build_armv7"], "true")
+        self.assertEqual(repaired["full_release"], "true")
+        self.assertEqual(repaired["publish"], "true")
+        self.assertEqual(repaired["prerelease"], "true")
+
+    def test_all_repair_rejects_an_invalid_release_tag(self):
+        result, outputs = self.select_targets(tag="invalid")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(outputs, {})
+        self.assertIn(b"valid release_tag is required", result.stdout)
 
 
 class Deadlines(unittest.TestCase):

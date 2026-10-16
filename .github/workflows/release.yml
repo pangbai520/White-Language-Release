@@ -20,13 +20,14 @@ on:
         type: string
         required: false
       source_run_id:
-        description: Failed release run ID to recover artifacts from (optional)
+        description: Failed run to recover artifacts from (single-platform repairs only, optional)
         type: string
         required: false
       platform:
-        description: Platform to rebuild
+        description: Platform to rebuild (all rebuilds every target)
         type: choice
         options:
+          - all
           - macos-x64
           - macos-arm64
           - windows-x64
@@ -82,7 +83,12 @@ jobs:
               echo "::error::A valid release_tag is required for a repair build."
               exit 1
             fi
-            if [ "$platform" = linux-armv7 ]; then
+            full_release=false
+            if [ "$platform" = all ]; then
+              matrix="$all_targets"
+              build_armv7=true
+              full_release=true
+            elif [ "$platform" = linux-armv7 ]; then
               matrix=$(printf '%s' "$all_targets" | jq -c '[.[] | select(.os_name == "linux-x64")]')
               build_armv7=true
             else
@@ -94,7 +100,6 @@ jobs:
               build_armv7=false
             fi
             publish=true
-            full_release=false
           else
             release_tag=""
             platform=none
