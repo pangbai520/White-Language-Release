@@ -108,7 +108,10 @@ def main():
     order.add_argument("--target", required=True)
     args = parser.parse_args()
     if args.operation == "order":
-        print("\n".join(ordered_commits(args.source, args.base, args.target)))
+        # Git Bash retains CR in word splitting, emit the revision protocol as
+        # bytes so Windows text-mode stdout cannot turn LF into CRLF.
+        commits = ordered_commits(args.source, args.base, args.target)
+        sys.stdout.buffer.write("".join(oid + "\n" for oid in commits).encode("ascii"))
         return
     platforms = args.platforms.split(",")
     if not platforms or any(platform not in ASSETS for platform in platforms):

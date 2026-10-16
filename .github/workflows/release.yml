@@ -486,10 +486,15 @@ jobs:
           }
 
           for COMMIT in $COMMITS; do
-            SHORT_SHA=$(git rev-parse --short $COMMIT)
+            COMMIT=${COMMIT%$'\r'}
+            if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              printf '::error::Invalid bootstrap commit: %q\n' "$COMMIT"
+              exit 1
+            fi
+            SHORT_SHA=$(git rev-parse --short "${COMMIT}^{commit}")
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $SHORT_SHA"
-            git checkout $COMMIT
+            git checkout "$COMMIT"
             if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
               stamp_release_metadata
             fi
@@ -762,10 +767,15 @@ jobs:
           fi
 
           for COMMIT in $COMMITS; do
-            SHORT_SHA=$(git rev-parse --short $COMMIT)
+            COMMIT=${COMMIT%$'\r'}
+            if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              printf '::error::Invalid bootstrap commit: %q\n' "$COMMIT"
+              exit 1
+            fi
+            SHORT_SHA=$(git rev-parse --short "${COMMIT}^{commit}")
             echo "------------------------------------------------"
             echo "Bootstrapping Commit: $SHORT_SHA"
-            git checkout $COMMIT
+            git checkout "$COMMIT"
             if [ "$COMMIT" == "$FINAL_COMMIT" ]; then
               stamp_release_metadata
             fi

@@ -1,7 +1,10 @@
 """Local regressions for release planning, deadlines and diagnostic handling."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -109,6 +112,41 @@ class History(unittest.TestCase):
         for data in (json.dumps(values), "\n".join(map(json.dumps, values)),
                      "\n".join(json.dumps([value]) for value in values)):
             self.assertEqual(list(plan.json_stream(data)), values)
+
+    def test_order_cli_emits_lf_bytes(self):
+        final = self.change("src/wlc.wl", "target")
+        result = subprocess.run([sys.executable, "-B", str(SCRIPTS / "bootstrap-plan.py"), "order",
+                                 "--source", str(self.repo), "--base", self.base, "--target", final],
+                                capture_output=True, check=True, timeout=15)
+        self.assertEqual(result.stdout, (final + "\n").encode("ascii"))
+
+    def test_bootstrap_loops_accept_crlf_and_reject_bad_revisions(self):
+        bash = shutil.which("bash")
+        if sys.platform == "win32":
+            for parent in Path(shutil.which("git")).parents:
+                candidate = parent / "bin/bash.exe"
+                if candidate.is_file():
+                    bash = str(candidate)
+                    break
+        if not bash:
+            self.skipTest("Bash is unavailable")
+        workflow = (SCRIPTS.parent / "workflows/release.yml").read_text(encoding="utf-8")
+        prefixes = re.findall(r'for COMMIT in \$COMMITS; do\n(.*?)echo "-+"', workflow, re.DOTALL)
+        self.assertEqual(len(prefixes), 2, "Expected Windows and Unix bootstrap loops")
+        final = self.change("src/wlc.wl", "target")
+        expected = [self.git("rev-parse", "--short", oid) for oid in (self.base, final)]
+        for prefix in prefixes:
+            script = 'for COMMIT in $TEST_COMMITS; do\n' + prefix + 'printf "%s\\n" "$SHORT_SHA"\ndone\n'
+            for separator in ("\n", "\r\n"):
+                payload = separator.join((self.base, final)) + separator
+                result = subprocess.run([bash, "-e", "-s"], input=script.encode(), capture_output=True,
+                                        cwd=self.repo, env={**os.environ, "TEST_COMMITS": payload}, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+                self.assertEqual(result.stdout.decode().splitlines(), expected)
+            result = subprocess.run([bash, "-e", "-s"], input=script.encode(), capture_output=True,
+                                    cwd=self.repo, env={**os.environ, "TEST_COMMITS": "not-a-commit\r\n"}, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"Invalid bootstrap commit", result.stdout)
 
 
 class Deadlines(unittest.TestCase):
