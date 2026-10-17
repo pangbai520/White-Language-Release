@@ -36,7 +36,7 @@ on:
           - linux-x86
           - linux-arm64
           - linux-armv7
-        default: macos-x64
+        default: all
 
 permissions:
   actions: read
@@ -145,7 +145,9 @@ jobs:
 
       - name: Test release helpers
         if: steps.config.outputs.publish == 'true'
-        run: python .github/scripts/test_workflows.py -v
+        run: |
+          python .github/scripts/test_workflows.py -v
+          python .github/scripts/test_bootstrap_resume.py -v
 
       - name: Select a compatible published bootstrap
         if: steps.config.outputs.publish == 'true'
@@ -509,6 +511,21 @@ jobs:
           python .github/scripts/compiler-checkpoint.py restore --package release_pkg --checkpoint .bootstrap-checkpoint \
             --commit "$TARGET_COMMIT" --platform "${{ matrix.os_name }}" --version "$TARGET_REF"
 
+      - name: Resume repair from an ancestor snapshot
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'repair' && steps.restore-compiler.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/bootstrap-resume.py prepare --source source_repo --target "$TARGET_COMMIT" \
+            --tag "$TARGET_REF" --platform "${{ matrix.os_name }}" --package boot_env \
+            --repository "$GITHUB_REPOSITORY" --github-env "$GITHUB_ENV" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach the checked toolchain to the repair seed
+        if: env.REPAIR_SNAPSHOT == 'true'
+        shell: bash
+        run: python .github/scripts/bootstrap-workspace.py attach --root "$GITHUB_WORKSPACE" --env boot_env
+
       - name: "[Windows] Bootstrap Compiler & Build Runtime"
         if: startsWith(matrix.os_name, 'windows') && steps.restore-compiler.outputs.cache-hit != 'true'
         shell: bash
@@ -524,8 +541,10 @@ jobs:
           fi
 
           echo "Bootstrapping from previous release: $PREV_TAG"
-          gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-*.zip" --dir boot_dl --clobber
-          unzip -q boot_dl/*.zip -d boot_env
+          if [ ! -f boot_env/bin/wlc.exe ]; then
+            gh release download "$PREV_TAG" -R ${{ github.repository }} --pattern "WhiteLanguage-Windows-${{ matrix.package_arch }}-Portable-*.zip" --dir boot_dl --clobber
+            unzip -q boot_dl/*.zip -d boot_env
+          fi
           rm -f boot_dl/*.zip
 
           if [ "${{ matrix.os_name }}" == "windows-x32" ]; then
@@ -721,14 +740,9 @@ jobs:
               cp -r std/* ../release_pkg/std/
             else
               SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
-              cd ../build_${SHORT_SHA}
-              if [ -d runtime ]; then
-                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip.part bin std runtime > /dev/null
-              else
-                7z a -tzip ../Output_Snapshots/${SNAP_NAME}.zip.part bin std > /dev/null
-              fi
-              mv ../Output_Snapshots/${SNAP_NAME}.zip.part ../Output_Snapshots/${SNAP_NAME}.zip
-              cd ../source_repo
+              python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-resume.py" snapshot \
+                --package "$ACTIVE_ENV" --archive "$GITHUB_WORKSPACE/Output_Snapshots/${SNAP_NAME}.zip" \
+                --commit "$COMMIT" --platform "${{ matrix.os_name }}" --tag "$TARGET_REF"
             fi
             python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" retire --root "$GITHUB_WORKSPACE" --env "$PREVIOUS_ENV" --active "$ACTIVE_ENV"
             python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" report --root "$GITHUB_WORKSPACE"
@@ -1011,14 +1025,9 @@ jobs:
               cp -r std/* ../release_pkg/std/
             else
               SNAP_NAME="${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}"
-              cd ../build_${SHORT_SHA}
-              if [ -d runtime ]; then
-                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz.part bin std runtime
-              else
-                tar -czf ../Output_Snapshots/${SNAP_NAME}.tar.gz.part bin std
-              fi
-              mv ../Output_Snapshots/${SNAP_NAME}.tar.gz.part ../Output_Snapshots/${SNAP_NAME}.tar.gz
-              cd ../source_repo
+              python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-resume.py" snapshot \
+                --package "$ACTIVE_ENV" --archive "$GITHUB_WORKSPACE/Output_Snapshots/${SNAP_NAME}.tar.gz" \
+                --commit "$COMMIT" --platform "${{ matrix.os_name }}" --tag "$TARGET_REF"
             fi
             python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" retire --root "$GITHUB_WORKSPACE" --env "$PREVIOUS_ENV" --active "$ACTIVE_ENV"
             python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-workspace.py" report --root "$GITHUB_WORKSPACE"
@@ -1118,6 +1127,16 @@ jobs:
           path: .bootstrap-checkpoint/
           include-hidden-files: true
           retention-days: 7
+
+      - name: Keep the final compiler as a repair seed
+        shell: bash
+        run: |
+          SHORT_SHA=$(git -C source_repo rev-parse --short "$TARGET_COMMIT")
+          SUFFIX=.tar.gz
+          if [[ "${{ matrix.os_name }}" == windows-* ]]; then SUFFIX=.zip; fi
+          python .github/scripts/bootstrap-resume.py snapshot --package release_pkg \
+            --archive "Output_Snapshots/${{ matrix.os_name }}-${VERSION_NO_V}-snapshot-${SHORT_SHA}${SUFFIX}" \
+            --commit "$TARGET_COMMIT" --platform "${{ matrix.os_name }}" --tag "$TARGET_REF"
 
       - name: "[Windows] Prepare C FFI host"
         if: startsWith(matrix.os_name, 'windows')
@@ -1457,6 +1476,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Record the release asset source
+        shell: bash
+        run: |
+          python .github/scripts/bootstrap-resume.py manifest --package release_pkg \
+            --commit "$TARGET_COMMIT" --platform "${{ matrix.os_name }}" --tag "$TARGET_REF"
+          cp release_pkg/build.json "Output/build-${{ matrix.os_name }}-${VERSION_NO_V}.json"
+
       - name: "[Windows] Compile InnoSetup Installer"
         if: startsWith(matrix.os_name, 'windows')
         shell: powershell
@@ -1666,6 +1692,11 @@ jobs:
           grep -Fq 'PASS:' <<< "$SMOKE_OUTPUT"
           rm -f "$GITHUB_WORKSPACE/arm_wlc_smoke"
 
+          SHORT_SHA=$(git rev-parse --short "$FINAL_COMMIT")
+          python "$GITHUB_WORKSPACE/.github/scripts/bootstrap-resume.py" snapshot --package "$ARM_ENV" \
+            --archive "$GITHUB_WORKSPACE/Output_Snapshots/linux-armv7-${VERSION_NO_V}-snapshot-${SHORT_SHA}.tar.gz" \
+            --commit "$FINAL_COMMIT" --platform linux-armv7 --tag "$TARGET_REF"
+
           ERRORS=0
           find tests -type f -name '*.wl' ! -path '*/ffi/*' ! -path '*/failures/*' ! -path '*/fixtures/*' | sort > "$GITHUB_WORKSPACE/positive-tests.txt"
           while IFS= read -r TEST_FILE; do
@@ -1733,6 +1764,7 @@ jobs:
           grep -Fq 'PASS:' <<< "$WL_OUTPUT"
           echo "ARMv7 C and White FFI hosts passed. Python FFI was not run on ARMv7."
 
+          cp "$ARM_ENV/build.json" "$GITHUB_WORKSPACE/Output/build-linux-armv7-${VERSION_NO_V}.json"
           tar -czf "$GITHUB_WORKSPACE/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C "$ARM_ENV" .
 
       - name: Store ARMv7 release asset

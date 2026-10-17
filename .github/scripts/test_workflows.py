@@ -609,7 +609,7 @@ class CompilerCheckpoint(unittest.TestCase):
         saved = workflow.index('      - name: Cache the completed compiler')
         self.assertLess(saved, workflow.index('      - name: "[Windows] Prepare C FFI host"'))
         self.assertLess(saved, workflow.index('      - name: Run language, integration'))
-        self.assertEqual(workflow.count("&& steps.restore-compiler.outputs.cache-hit != 'true'"), 2)
+        self.assertEqual(workflow.count("&& steps.restore-compiler.outputs.cache-hit != 'true'"), 3)
         self.assertIn("      - name: Store bootstrap snapshots\n        if: always()", workflow)
         self.assertLess(workflow.index('      - name: "[Windows x32] Configure the target linker"'),
                         workflow.index('      - name: Restore completed compiler bootstrap'))
