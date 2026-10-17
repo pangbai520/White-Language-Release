@@ -136,7 +136,14 @@ class RepairSeeds(unittest.TestCase):
                         workflow.index('Run language, integration'))
         self.assertLess(workflow.index('snapshot --package "$ARM_ENV"'),
                         workflow.index('          ERRORS=0', workflow.index('snapshot --package "$ARM_ENV"')))
-        self.assertIn('build-${{ matrix.os_name }}-${VERSION_NO_V}.json', workflow)
+        self.assertNotIn('Output/build-', workflow)
+        self.assertNotIn('manifest --package release_pkg', workflow)
+        cleanup = workflow.index('      - name: Remove CI metadata before packaging')
+        self.assertLess(cleanup, workflow.index('      - name: "[Windows] Compile InnoSetup Installer"'))
+        self.assertLess(cleanup, workflow.index('      - name: "[Unix] Compress Tarball"'))
+        self.assertLess(cleanup, workflow.index('      - name: "[Windows] Create Portable Zip"'))
+        self.assertIn('          rm -f release_pkg/build.json', workflow)
+        self.assertIn('          rm -f "$ARM_ENV/build.json"\n          tar -czf', workflow)
 
     def test_snapshot_round_trip_verifies_metadata_and_binary(self):
         package = self.package()

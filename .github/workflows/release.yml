@@ -1476,12 +1476,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Record the release asset source
+      - name: Remove CI metadata before packaging
         shell: bash
         run: |
-          python .github/scripts/bootstrap-resume.py manifest --package release_pkg \
-            --commit "$TARGET_COMMIT" --platform "${{ matrix.os_name }}" --tag "$TARGET_REF"
-          cp release_pkg/build.json "Output/build-${{ matrix.os_name }}-${VERSION_NO_V}.json"
+          rm -f release_pkg/build.json
 
       - name: "[Windows] Compile InnoSetup Installer"
         if: startsWith(matrix.os_name, 'windows')
@@ -1764,7 +1762,7 @@ jobs:
           grep -Fq 'PASS:' <<< "$WL_OUTPUT"
           echo "ARMv7 C and White FFI hosts passed. Python FFI was not run on ARMv7."
 
-          cp "$ARM_ENV/build.json" "$GITHUB_WORKSPACE/Output/build-linux-armv7-${VERSION_NO_V}.json"
+          rm -f "$ARM_ENV/build.json"
           tar -czf "$GITHUB_WORKSPACE/Output/whitelang-linux-armv7-$VERSION_NO_V.tar.gz" -C "$ARM_ENV" .
 
       - name: Store ARMv7 release asset
